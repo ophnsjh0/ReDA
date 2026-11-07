@@ -1,0 +1,33 @@
+[project]
+name = "reda"
+version = "0.1.0"
+description = "ReDA (Reply Draft Agent): 답장필요 메일 분류, 근거가 달린 답장 초안, 일정 제안"
+readme = "CLAUDE.md"
+requires-python = ">=3.13"
+dependencies = [
+    "beautifulsoup4>=4.12.0",
+    "google-api-python-client>=2.100.0",
+    "google-auth-httplib2>=0.2.0",
+    "google-auth-oauthlib>=1.2.0",
+    "numpy>=2.0",
+    "openai>=1.50.0",
+    "openpyxl>=3.1.5",
+    "pypdf>=5.0",
+    "python-dotenv>=1.0",
+]
+
+[project.scripts]
+reda = "reda.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/reda"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

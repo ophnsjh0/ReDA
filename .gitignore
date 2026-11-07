@@ -1,0 +1,36 @@
+# 비밀 정보 — 절대 커밋하지 않는다
+.env
+.env.*
+!.env.example
+credentials.json
+token.json
+*.pem
+*.key
+
+# 사용자 데이터 (토큰, 상태 DB, 문서 색인)
+.reda/
+*.db
+*.db-shm
+*.db-wal
+
+# Python / uv
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# 에디터·OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# 공개 저장소에 올리지 않는 운영 메모 (서버 접속·계정·보안 설정)
+*.local.md
+CLAUDE.local.md
