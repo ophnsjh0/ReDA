@@ -35,18 +35,34 @@ def cmd_gmail_auth(args):
 
 
 def cmd_poll(args):
-    from reda.gmail import client
+    """지난 동기화 이후의 변경을 가져온다. --dry-run이면 상태 DB를 바꾸지 않고 출력만 한다."""
+    from reda.gmail import client, history
+    from reda.state import StateDB
     if not args.dry_run:
         print('분류·라벨 기능은 아직 없습니다 (구현계획 2단계). --dry-run으로 실행하세요.',
               file=sys.stderr)
         return 2
-    service = client.get_gmail_service(_settings())
-    messages = client.list_new_messages(service, query=args.query, max_results=args.max)
-    print(f'분류 라벨이 없는 메일 {len(messages)}통')
-    for ref in messages:
+    settings = _settings()
+    service = client.get_gmail_service(settings)
+    with StateDB.open(settings) as state:
+        start = state.history_id
+        changes = history.fetch_changes(service, start, resync_query=args.query,
+                                        max_results=args.max)
+        new = [m for m in changes.new_messages if not state.is_processed(m['id'])]
+
+    how = '검색 쿼리로 처음부터' if changes.full_resync else f'historyId {start} 이후'
+    print(f'동기화 방식: {how} (다음 시작점 {changes.history_id})')
+    print(f'새 메일 {len(new)}통')
+    for ref in new:
         meta = client.get_message_metadata(service, ref['id'])
         print(f"- {client.get_header(meta, 'Date')} | {client.get_header(meta, 'From')}"
               f" | {client.get_header(meta, 'Subject')}")
+    if changes.label_changes:
+        print(f'분류 라벨 변경 {len(changes.label_changes)}건')
+        for c in changes.label_changes:
+            print(f'- {c.message_id}: {c.label} {"추가" if c.action == "added" else "제거"}')
+    if changes.sent_messages:
+        print(f'보낸 메일 {len(changes.sent_messages)}통')
     return 0
 
 
