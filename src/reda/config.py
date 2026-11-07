@@ -39,7 +39,7 @@ class Settings:
     gmail_token_file: Path
     # 사용자 본인 주소. 수신/참조 판정(참조 전용 메일 거르기)에 쓴다.
     my_addresses: tuple[str, ...]
-    # 고객사 도메인 → 고객사 이름. 제조사 도메인은 parsing.VENDOR_DOMAINS에 기본값이 있다.
+    # 고객사 도메인 → 고객사 이름. (제조사 도메인 목록은 2단계 규칙 필터에서 정한다)
     customer_domains: dict[str, str]
     # 제목에 들어 있으면 규칙 필터에서 '참고'로 거르는 키워드
     exclude_subjects: tuple[str, ...]

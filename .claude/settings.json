@@ -1,0 +1,38 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(uv run pytest *)",
+      "Bash(uv sync *)",
+      "Bash(git status *)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(git branch *)",
+      "Bash(git show *)",
+      "Bash(python3 -I scripts/check_public.py *)"
+    ],
+    "deny": [
+      "Read(./.env)",
+      "Read(./**/token.json)",
+      "Read(./**/credentials.json)",
+      "Read(~/.reda/**)",
+      "Bash(git push --force *)",
+      "Bash(git push -f *)",
+      "Bash(git push --force-with-lease *)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 -I \"$CLAUDE_PROJECT_DIR/scripts/check_public.py\" --hook",
+            "timeout": 30,
+            "statusMessage": "공개 저장소 위생 검사"
+          }
+        ]
+      }
+    ]
+  }
+}

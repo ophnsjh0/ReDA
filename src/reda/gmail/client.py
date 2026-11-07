@@ -1,7 +1,5 @@
 """Gmail API 클라이언트: OAuth, 메일·스레드 조회, 라벨, 답장 초안 저장.
 
-CASE_Flow backend/api/services/gmail_client.py에서 가져와 Django 설정 의존을 뺐다.
-
 발송 함수는 일부러 두지 않는다. 초안 저장에 필요한 gmail.modify 권한에는 발송 권한도
 들어 있어서, OAuth 범위로는 발송을 막을 수 없다. 이 모듈에서 messages.send·drafts.send를
 부르지 않는 것이 발송을 막는 유일한 장치다. 이 모듈에 발송 기능을 추가하지 않는다.

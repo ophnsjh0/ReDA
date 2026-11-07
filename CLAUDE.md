@@ -10,6 +10,8 @@ ReDA(Reply Draft Agent)는 기술지원(TAC) 엔지니어의 Gmail에서 답장�
 
 - `기획안/ReDA_기획안.md`: 서비스 기획안이며 요구사항의 원본이다. 동작을 정할 때 먼저 확인한다.
 - `기획안/구현계획.md`: 단계별 구현 계획과 결정 사항. 단계를 진행하거나 결정이 나면 여기에 반영한다.
+- `기획안/검증기준.md`: 단계를 끝내기 전에 통과해야 할 공통 게이트(테스트, 발송 차단, 공개 저장소 위생, `/security-review`, `/code-review`)와 단계별 기준. 확인 절차는 `reda-stage-gate` skill이 정한다.
+- 단계마다 `stage-<번호>-<이름>` 브랜치에서 작업하고, 게이트를 통과한 뒤 사용자 확인을 받아 `main`에 합친다. `main`에 바로 커밋하면 `/security-review`가 검토할 변경이 남지 않는다.
 - `참조/`: 참고 자료를 두는 폴더다(현재 비어 있음).
 - `진행내역/진행내역.md`: 날짜·시각별 대화 요지와 진행 사항 기록(git 제외). 작업을 마칠 때마다 타임라인과 단계별 상태를 갱신한다.
 
@@ -25,6 +27,8 @@ uv run reda gmail auth        # 브라우저로 Google 동의 → 토큰 저장 
 uv run reda poll --dry-run    # 분류 라벨이 없는 새 메일 목록 출력
 ```
 
+- 공개 저장소 위생 검사: `python3 -I scripts/check_public.py`. 운영 값은 git 제외 파일 `.claude/sensitive-patterns.local`(한 줄에 정규식 하나)에서 읽는다. 커밋할 때 자동으로 돈다: Claude Code의 PreToolUse hook(`.claude/settings.json`)과 로컬 git pre-commit hook(`.git/hooks/pre-commit`, git에 올라가지 않음). 새로 clone하면 pre-commit hook을 다시 설치해야 한다.
+- `.claude/settings.json`은 `.env`, `token.json`, `credentials.json`, `~/.reda/` 읽기와 `git push --force`를 막는다. Read 도구만 막으므로, Bash로 이 파일들을 출력하는 명령도 쓰지 않는다.
 - 설정은 `.env`에서 읽는다. `.env.example`을 복사해 만든다. `REDA_ENV_FILE`로 다른 파일을 지정할 수 있다.
 - `.env`, `credentials.json`, `token.json`, `*.db`는 git에 올리지 않는다 (`.gitignore`).
 - 의존성 추가는 `uv add <패키지>`, 개발용은 `uv add --dev <패키지>`.
