@@ -65,3 +65,23 @@ def test_measurement_records_are_idempotent(state):
 def test_rejects_unknown_label_action(state):
     with pytest.raises(ValueError):
         state.record_label_event('m1', 't1', '답장필요', 'renamed')
+
+
+def test_v1_db_is_upgraded_with_failures_table(tmp_path):
+    import sqlite3
+
+    from reda.state import _SCHEMA
+    path = tmp_path / 'state.db'
+    conn = sqlite3.connect(path)
+    conn.executescript(_SCHEMA)
+    conn.execute('PRAGMA user_version = 1')
+    conn.execute("INSERT INTO sync(key, value) VALUES ('history_id', '42')")
+    conn.commit()
+    conn.close()
+    with StateDB(path) as db:
+        assert db.history_id == '42'
+        db.record_failure('m1', 't1', 'boom')
+        db.record_failure('m1', 't1', 'boom again')
+        row = db.failures()[0]
+        assert (row['attempts'], row['last_error']) == (2, 'boom again')
+        assert db.failures(max_attempts=2) == []

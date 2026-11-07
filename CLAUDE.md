@@ -6,7 +6,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ReDA(Reply Draft Agent)는 기술지원(TAC) 엔지니어의 Gmail에서 답장이 필요한 메일을 골라 답장 초안을 임시보관함에 넣고, 메일 속 일정은 메신저로 확인받은 뒤 구글 캘린더에 등록하는 에이전트다.
 
-구현계획 1단계(개발 기반)를 진행하고 있다. 지금 있는 코드는 설정(`src/reda/config.py`), Gmail 클라이언트(`src/reda/gmail/client.py`), CLI(`src/reda/cli.py`)다.
+1단계(개발 기반)를 마쳤고 2단계(분류·라벨)를 `stage-2-rules` 브랜치에서 진행하고 있다. 처리 흐름은 `reda poll`(`src/reda/poll.py`)이 묶는다.
+
+- 새 메일 가져오기: `gmail/history.py` (History API, 만료되면 검색 쿼리)
+- 규칙 필터: `rules.py`. 메일 파싱은 `mail.py`
+- 마스킹: `mask.py`
+- 분류기: `classify/`. Jev 사양을 받기 전에는 Claude API로 임시 구현
+- 상태 DB: `state.py` (처리 기록, 실패, 측정용 라벨 변경·놓친 답장)
+- 동시 실행 잠금: `lock.py`
 
 - `기획안/ReDA_기획안.md`: 서비스 기획안이며 요구사항의 원본이다. 동작을 정할 때 먼저 확인한다.
 - `기획안/구현계획.md`: 단계별 구현 계획과 결정 사항. 단계를 진행하거나 결정이 나면 여기에 반영한다.
@@ -24,7 +31,8 @@ uv sync                       # 의존성 설치 (.venv 생성)
 uv run pytest                 # 테스트
 uv run pytest tests/test_no_send.py   # 발송 차단 검사만
 uv run reda gmail auth        # 브라우저로 Google 동의 → 토큰 저장 (개발용)
-uv run reda poll --dry-run    # 분류 라벨이 없는 새 메일 목록 출력
+uv run reda poll --dry-run    # 새 메일과 규칙 필터 결과 출력 (Gmail·상태 DB를 바꾸지 않고 LLM도 부르지 않음)
+uv run reda poll              # 분류하고 Gmail 라벨을 붙임 (실제 메일함을 바꾼다)
 ```
 
 - 공개 저장소 위생 검사: `python3 -I scripts/check_public.py`. 운영 값은 git 제외 파일 `.claude/sensitive-patterns.local`(한 줄에 정규식 하나)에서 읽는다. 커밋할 때 자동으로 돈다: Claude Code의 PreToolUse hook(`.claude/settings.json`)과 로컬 git pre-commit hook(`.git/hooks/pre-commit`, git에 올라가지 않음). 새로 clone하면 pre-commit hook을 다시 설치해야 한다.

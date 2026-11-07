@@ -47,6 +47,9 @@ class Settings:
     reference_db: Path
     embedding_model: str
     openai_api_key: str
+    # 분류기(LLM 임시 구현). Jev 사양을 받으면 바뀐다. API 키는 ANTHROPIC_API_KEY.
+    classifier_model: str
+    classifier_effort: str
 
     @classmethod
     def from_env(cls):
@@ -62,4 +65,6 @@ class Settings:
             reference_db=_path('REDA_REFERENCE_DB', data_dir / 'references.db'),
             embedding_model=_env('REDA_EMBEDDING_MODEL', 'text-embedding-3-small'),
             openai_api_key=_env('OPENAI_API_KEY'),
+            classifier_model=_env('REDA_CLASSIFIER_MODEL', 'claude-opus-5-5'),
+            classifier_effort=_env('REDA_CLASSIFIER_EFFORT', 'low'),
         )

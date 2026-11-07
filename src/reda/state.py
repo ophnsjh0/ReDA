@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (
@@ -58,6 +58,17 @@ CREATE TABLE IF NOT EXISTS sync (
 );
 """
 
+# 2: 처리에 실패한 메일. 다음 실행에서 다시 시도하고, 성공하면 지운다.
+_SCHEMA_V2 = """
+CREATE TABLE IF NOT EXISTS failures (
+    message_id  TEXT PRIMARY KEY,
+    thread_id   TEXT NOT NULL,
+    attempts    INTEGER NOT NULL,
+    last_error  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL
+);
+"""
+
 
 def _now():
     return datetime.now(timezone.utc).isoformat(timespec='seconds')
@@ -103,7 +114,11 @@ class StateDB:
         if version < 1:
             with self.conn:
                 self.conn.executescript(_SCHEMA)
-                self.conn.execute(f'PRAGMA user_version = {SCHEMA_VERSION}')
+                self.conn.execute('PRAGMA user_version = 1')
+        if version < 2:
+            with self.conn:
+                self.conn.executescript(_SCHEMA_V2)
+                self.conn.execute('PRAGMA user_version = 2')
 
     # ------------------------------------------------------------ sync
     def get_sync(self, key, default=None):
@@ -186,3 +201,25 @@ class StateDB:
     def missed_replies(self):
         return self.conn.execute(
             'SELECT * FROM missed_replies ORDER BY observed_at').fetchall()
+
+    # ------------------------------------------------------------ 실패
+    def record_failure(self, message_id, thread_id, error):
+        with self.conn:
+            self.conn.execute(
+                'INSERT INTO failures(message_id, thread_id, attempts, last_error, updated_at)'
+                ' VALUES (?, ?, 1, ?, ?) ON CONFLICT(message_id) DO UPDATE SET'
+                ' attempts = attempts + 1, last_error = excluded.last_error,'
+                ' updated_at = excluded.updated_at',
+                (message_id, thread_id, str(error)[:500], _now()))
+
+    def clear_failure(self, message_id):
+        with self.conn:
+            self.conn.execute('DELETE FROM failures WHERE message_id = ?', (message_id,))
+
+    def failures(self, max_attempts=None):
+        """max_attempts를 주면 아직 그만큼 시도하지 않은 것만 돌려준다."""
+        if max_attempts is None:
+            return self.conn.execute('SELECT * FROM failures ORDER BY updated_at').fetchall()
+        return self.conn.execute(
+            'SELECT * FROM failures WHERE attempts < ? ORDER BY updated_at',
+            (max_attempts,)).fetchall()

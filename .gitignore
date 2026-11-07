@@ -44,3 +44,7 @@ tests/private/
 # Claude Code 개인 설정
 .claude/settings.local.json
 .claude/sensitive-patterns.local
+
+# 개인 출력 스타일 (attention-span, AGPL-3.0. 공개 저장소에 다시 배포하지 않는다)
+.claude/output-styles/
+.claude/commands/style.md
