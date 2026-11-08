@@ -10,9 +10,11 @@ ReDA(Reply Draft Agent)는 기술지원(TAC) 엔지니어의 Gmail에서 답장�
 
 - 새 메일 가져오기: `gmail/history.py` (History API, 만료되면 검색 쿼리)
 - 규칙 필터: `rules.py`. 메일 파싱은 `mail.py`
+- 팀 메일 담당자 판정: `identity.py`. 수신 방식(개인 To·그룹 To·개인 Cc·그룹 Cc·숨은참조)과 이름 프로필로, 그룹 주소로만 받은 `답장필요`는 인사말이 나를 부르거나 내가 답한 스레드일 때만 그대로 둔다 (결정 2-5, 2-6)
 - 마스킹: `mask.py`
-- 분류기: `classify/`. Jev 사양을 받기 전에는 Claude API로 임시 구현
-- 상태 DB: `state.py` (처리 기록, 실패, 측정용 라벨 변경·놓친 답장)
+- 분류기: `classify/`. 제공자는 설정 `REDA_CLASSIFIER`(anthropic / jev)와 `REDA_CLASSIFIER_MODEL`로 고른다. 지금은 Claude API를 쓰고, Jev(TypeSafe) 어댑터는 실제 키로 확인하기 전이다
+- 골든 세트: `golden.py`. 실제 메일과 정답은 `tests/private/`(git 제외)에 둔다
+- 상태 DB: `state.py` (SQLite, 사용자마다 파일 하나. 처리 기록과 판단 특징, 실패, 측정용 라벨 변경·놓친 답장, 사용자 정보: 이름 프로필·맡은 일·피드백. 결정 2-7)
 - 동시 실행 잠금: `lock.py`
 
 - `기획안/ReDA_기획안.md`: 서비스 기획안이며 요구사항의 원본이다. 동작을 정할 때 먼저 확인한다.
@@ -33,6 +35,10 @@ uv run pytest tests/test_no_send.py   # 발송 차단 검사만
 uv run reda gmail auth        # 브라우저로 Google 동의 → 토큰 저장 (개발용)
 uv run reda poll --dry-run    # 새 메일과 규칙 필터 결과 출력 (Gmail·상태 DB를 바꾸지 않고 LLM도 부르지 않음)
 uv run reda poll              # 분류하고 Gmail 라벨을 붙임 (실제 메일함을 바꾼다)
+uv run reda classifier --try  # 지금 설정한 분류기로 지어낸 메일 한 통을 분류해 봄
+uv run reda profile           # 내 주소·그룹·이름 프로필 확인 (팀 메일 담당자 판정에 씀)
+uv run reda golden export     # 골든 세트 CSV 내보내기 (tests/private/golden.csv, 정답은 사람이 채움)
+uv run reda golden eval       # 정답이 있는 메일을 분류해 놓침·확인필요 비율 출력 (분류기 API를 부름)
 ```
 
 - 공개 저장소 위생 검사: `python3 -I scripts/check_public.py`. 운영 값은 git 제외 파일 `.claude/sensitive-patterns.local`(한 줄에 정규식 하나)에서 읽는다. 커밋할 때 자동으로 돈다: Claude Code의 PreToolUse hook(`.claude/settings.json`)과 로컬 git pre-commit hook(`.git/hooks/pre-commit`, git에 올라가지 않음). 새로 clone하면 pre-commit hook을 다시 설치해야 한다.

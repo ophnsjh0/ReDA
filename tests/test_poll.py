@@ -3,7 +3,8 @@ import pytest
 from fakes import FakeGmail, added, make_message
 
 from reda import poll
-from reda.classify import Classification, ClassifierUnavailable
+from reda.classify import (Classification, ClassifierBusy, ClassifierRequestRejected,
+                           ClassifierUnavailable)
 from reda.config import Settings
 from reda.lock import AlreadyRunning, exclusive
 from reda.state import StateDB
@@ -164,3 +165,148 @@ def test_second_run_exits_while_first_holds_lock(tmp_path):
                 pass
     with exclusive(tmp_path / 'poll.lock'):   # 끝나면 다시 잡을 수 있다
         pass
+
+
+def test_classifier_name_is_recorded_as_source(settings, state):
+    classifier = CountingClassifier()
+    classifier.name = 'jev/jev-latest'
+    gmail = gmail_with(customer('c1'))
+    poll.run(gmail, state, settings, classifier)
+    assert state.get_message('c1')['source'] == 'classifier:jev/jev-latest'
+
+
+
+class SelectiveClassifier:
+    """지정한 메일만 거부하고 나머지는 분류한다."""
+
+    def __init__(self, reject=(), error=ClassifierRequestRejected('HTTP 400')):
+        self.reject, self.error = set(reject), error
+
+    def classify(self, mail):
+        if mail.id in self.reject:
+            raise self.error
+        return Classification('답장필요', '보통', '문의')
+
+
+def test_rejection_of_one_mail_is_recorded_when_others_succeed(settings, state):
+    gmail = gmail_with(customer('c1', 1), customer('c2', 2))
+    result = poll.run(gmail, state, settings, SelectiveClassifier(reject={'c1'}))
+    assert result.by_classifier == 1 and result.failed == 1
+    assert [r['message_id'] for r in state.failures(poll.MAX_ATTEMPTS)] == ['c1']
+    assert state.history_id == '200'
+
+
+def test_rejection_of_every_mail_stops_without_counting_failures(settings, state):
+    gmail = gmail_with(customer('c1', 1), customer('c2', 2))
+    with pytest.raises(ClassifierUnavailable, match='모두 거부'):
+        poll.run(gmail, state, settings, SelectiveClassifier(reject={'c1', 'c2'}))
+    assert state.failures(poll.MAX_ATTEMPTS) == []
+    assert state.history_id == '100'            # 설정을 고친 뒤 다시 가져온다
+
+
+def test_busy_classifier_stops_without_using_attempts(settings, state):
+    gmail = gmail_with(customer('c1', 1))
+    with pytest.raises(ClassifierBusy):
+        poll.run(gmail, state, settings, SelectiveClassifier(reject={'c1'}, error=ClassifierBusy('429')))
+    assert state.failures(poll.MAX_ATTEMPTS) == []
+    assert state.history_id == '100'
+
+
+# ---------------------------------------------------------------- 팀 메일 담당자 판정 (결정 2-5)
+
+GROUP = 'tac-team@corp.example.com'
+
+
+@pytest.fixture
+def team_settings(monkeypatch, tmp_path):
+    monkeypatch.setenv('REDA_DATA_DIR', str(tmp_path))
+    monkeypatch.setenv('REDA_MY_ADDRESSES', ME)
+    monkeypatch.setenv('REDA_MY_GROUPS', GROUP)
+    monkeypatch.setenv('REDA_MY_TITLES', '부장')
+    return Settings.from_env()
+
+
+def team_gmail(*messages, threads=None):
+    gmail = gmail_with(*messages)
+    gmail.display_name = '홍길동'
+    gmail.threads = threads or {}
+    return gmail
+
+
+def group_request(mid, body, **headers):
+    headers.setdefault('To', GROUP)
+    return make_message(mid, internal_date=10, From='lee@customer-a.example.com',
+                        Subject='설정 문의', body=body, **headers)
+
+
+def test_group_request_greeting_someone_else_becomes_fyi(team_settings, state):
+    classifier = CountingClassifier(Classification('답장필요', '보통', '문의', addressee='김철수 과장님'))
+    gmail = team_gmail(group_request('g1', '김철수 과장님, 설정 확인 부탁드립니다.'))
+    poll.run(gmail, state, team_settings, classifier)
+    row = state.get_message('g1')
+    assert row['category'] == '참고'
+    assert (row['recipient_mode'], row['addressee'], row['addressee_match']) == (
+        'group_to', '김철수 과장님', 'other')
+    assert gmail.modified == [('g1', ['참고'])]
+
+
+def test_group_request_greeting_me_stays_reply(team_settings, state):
+    classifier = CountingClassifier(Classification('답장필요', '보통', '문의', addressee='길동 부장님'))
+    poll.run(team_gmail(group_request('g1', '길동 부장님, 확인 부탁드립니다.')), state,
+             team_settings, classifier)
+    assert state.get_message('g1')['category'] == '답장필요'
+    assert state.get_message('g1')['addressee_match'] == 'me'
+
+
+def test_group_request_without_clue_is_check_unless_i_replied(team_settings, state):
+    gmail = team_gmail(group_request('g1', '안녕하세요. 확인 부탁드립니다.'),
+                       make_message('g2', thread_id='t-mine', internal_date=20,
+                                    From='lee@customer-a.example.com', To=GROUP,
+                                    body='안녕하세요. 추가 문의입니다.'),
+                       threads={'t-mine': [{'labelIds': ['SENT'], 'internalDate': '5'}]})
+    poll.run(gmail, state, team_settings, CountingClassifier())
+    assert state.get_message('g1')['category'] == '확인필요'
+    assert state.get_message('g2')['category'] == '답장필요'      # 내가 답한 스레드
+
+
+def test_group_cc_greeting_me_goes_to_classifier(team_settings, state):
+    classifier = CountingClassifier()
+    m = group_request('g1', '길동 부장님, 참조로 넣었습니다. 의견 부탁드립니다.',
+                      To='kim@corp.example.com', Cc=GROUP)
+    poll.run(team_gmail(m), state, team_settings, classifier)
+    assert classifier.seen == ['g1']
+    assert state.get_message('g1')['category'] == '답장필요'
+
+
+def test_group_cc_without_greeting_stays_rule(team_settings, state):
+    classifier = CountingClassifier()
+    m = group_request('g1', '김철수 과장님, 확인 부탁드립니다.', To='kim@corp.example.com', Cc=GROUP)
+    poll.run(team_gmail(m), state, team_settings, classifier)
+    assert classifier.seen == []
+    row = state.get_message('g1')
+    assert (row['category'], row['source'], row['recipient_mode']) == ('참고', 'rule', 'group_cc')
+
+
+def test_personal_request_is_not_changed_by_owner_check(team_settings, state):
+    classifier = CountingClassifier(Classification('답장필요', '보통', '문의', addressee='김철수 과장님'))
+    poll.run(team_gmail(customer('c1')), state, team_settings, classifier)
+    assert state.get_message('c1')['category'] == '답장필요'
+    assert state.get_message('c1')['recipient_mode'] == 'personal_to'
+
+
+def test_poll_remembers_display_name(team_settings, state):
+    poll.run(team_gmail(customer('c1')), state, team_settings, CountingClassifier())
+    assert state.get_profile('display_name') == '홍길동'
+
+
+def test_always_rejected_retry_does_not_stall_sync(settings, state):
+    """리뷰 지적: 늘 거부되는 메일 하나가 다음 실행들을 계속 멈추면 안 된다."""
+    gmail = gmail_with(customer('c1', 1), customer('c2', 2))
+    classifier = SelectiveClassifier(reject={'c1'})
+    poll.run(gmail, state, settings, classifier)                 # c1 실패 기록, c2 분류
+    assert [r['attempts'] for r in state.failures()] == [1]
+
+    gmail.history_pages = [{'history': [], 'historyId': '300'}]  # 새 메일 없음
+    result = poll.run(gmail, state, settings, classifier)        # c1만 다시 시도 → 거부
+    assert result.failed == 1 and state.history_id == '300'      # 멈추지 않고 진행
+    assert [r['attempts'] for r in state.failures()] == [2]

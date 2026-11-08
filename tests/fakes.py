@@ -34,16 +34,21 @@ class FakeGmail:
     query_messages: messages.list가 돌려줄 메일 목록
     messages: messages.get이 돌려줄 메일 {id: make_message(...)}
     broken: messages.get이 500을 내는 메일 id
+    display_name: settings.sendAs.list가 돌려줄 기본 주소의 표시 이름
+    threads: threads.get이 돌려줄 스레드 {thread_id: [{'labelIds': [...], 'internalDate': '…'}]}
     """
 
     def __init__(self, *, labels=None, profile_history_id='1000', history_pages=None,
-                 query_messages=None, messages=None, broken=()):
+                 query_messages=None, messages=None, broken=(), display_name='',
+                 threads=None):
         self.labels = dict(labels or {})
         self.profile_history_id = profile_history_id
         self.history_pages = history_pages if history_pages is not None else []
         self.query_messages = query_messages or []
         self.messages = dict(messages or {})
         self.broken = set(broken)
+        self.display_name = display_name
+        self.threads = dict(threads or {})
         self.modified = []          # (message_id, 붙인 라벨 이름 목록)
         self.calls = []
 
@@ -54,7 +59,18 @@ class FakeGmail:
             'history': _Resource({'list': self._history_list}),
             'messages': _Resource({'list': self._messages_list, 'get': self._messages_get,
                                    'modify': self._messages_modify}),
+            'threads': _Resource({'get': self._threads_get}),
+            'settings': _Resource({'sendAs': _Resource({'list': self._send_as_list})}),
         })
+
+    def _send_as_list(self, userId):
+        self.calls.append(('sendAs.list',))
+        return {'sendAs': [{'sendAsEmail': 'me@corp.example.com', 'isPrimary': True,
+                            'displayName': self.display_name}]}
+
+    def _threads_get(self, userId, id, format='full'):
+        self.calls.append(('threads.get', id))
+        return {'id': id, 'messages': self.threads.get(id, [])}
 
     def _labels_create(self, userId, body):
         label_id = f'Label_{len(self.labels) + 1}'
@@ -91,7 +107,7 @@ class FakeGmail:
         index = int(pageToken) if pageToken else 0
         return self.history_pages[index]
 
-    def _messages_list(self, userId, q, maxResults):
+    def _messages_list(self, userId, q, maxResults, pageToken=None):
         self.calls.append(('messages.list', q))
         return {'messages': self.query_messages}
 
@@ -109,7 +125,8 @@ def label_change(history_id, key, message_id, thread_id, label_ids):
 def make_message(message_id, *, thread_id=None, internal_date=0, labels=('INBOX',),
                  body='', **headers):
     """헤더는 키워드로 받는다. 밑줄은 하이픈으로 바꾼다 (reply_to → Reply-To)."""
-    names = {'x_original_sender': 'X-Original-Sender', 'auto_submitted': 'Auto-Submitted'}
+    names = {'x_original_sender': 'X-Original-Sender', 'auto_submitted': 'Auto-Submitted',
+             'list_id': 'List-Id', 'return_path': 'Return-Path'}
     header_list = [{'name': names.get(k, k.replace('_', '-').title()), 'value': v}
                    for k, v in headers.items()]
     data = base64.urlsafe_b64encode(body.encode()).decode()

@@ -99,6 +99,13 @@ def get_thread(service, thread_id):
     return service.users().threads().get(userId='me', id=thread_id, format='full').execute()
 
 
+def thread_has_my_reply(service, thread_id, before_ms):
+    """이 스레드에 before_ms(밀리초) 전에 내가 보낸 메일이 있는가."""
+    thread = service.users().threads().get(userId='me', id=thread_id, format='minimal').execute()
+    return any('SENT' in m.get('labelIds', []) and int(m.get('internalDate') or 0) < before_ms
+               for m in thread.get('messages', []))
+
+
 def add_labels(service, message_id, label_ids):
     service.users().messages().modify(
         userId='me', id=message_id, body={'addLabelIds': list(label_ids)}).execute()

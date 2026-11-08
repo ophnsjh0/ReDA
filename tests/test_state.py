@@ -85,3 +85,66 @@ def test_v1_db_is_upgraded_with_failures_table(tmp_path):
         row = db.failures()[0]
         assert (row['attempts'], row['last_error']) == (2, 'boom again')
         assert db.failures(max_attempts=2) == []
+
+
+def test_v2_db_is_upgraded_with_user_tables(tmp_path):
+    import sqlite3
+
+    from reda.state import _SCHEMA, _SCHEMA_V2
+    path = tmp_path / 'state.db'
+    conn = sqlite3.connect(path)
+    conn.executescript(_SCHEMA + _SCHEMA_V2)
+    conn.execute('PRAGMA user_version = 2')
+    conn.execute("INSERT INTO messages(message_id, thread_id, category, source, labeled_at)"
+                 " VALUES ('m1', 't1', '참고', 'rule', 'x')")
+    conn.commit()
+    conn.close()
+    with StateDB(path) as state:
+        assert state.get_message('m1')['recipient_mode'] is None
+        state.record_classification('m2', 't2', '확인필요', recipient_mode='group_to',
+                                    addressee='김철수 과장님', addressee_match='other')
+        assert state.get_message('m2')['addressee_match'] == 'other'
+        state.set_profile('display_name', '홍길동', source='sendas')
+        assert state.get_profile('display_name') == '홍길동'
+        tables = {r[0] for r in state.conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        assert {'user_profile', 'identity_aliases', 'responsibilities', 'feedback'} <= tables
+
+
+def test_alias_status_is_kept_on_upsert(tmp_path):
+    with StateDB(tmp_path / 'state.db') as state:
+        state.upsert_alias('GD', 'alias', 'config')
+        state.set_alias_status('GD', 'alias', 'rejected')
+        state.upsert_alias('GD', 'alias', 'config')          # 거절한 별칭을 되살리지 않는다
+        assert [r['alias'] for r in state.aliases('rejected')] == ['GD']
+        with pytest.raises(ValueError):
+            state.upsert_alias('X', 'alias', 'config', status='maybe')
+
+
+def test_v3_migration_is_atomic_and_rerunnable(tmp_path, monkeypatch):
+    """리뷰 지적: 이전 도중 실패하면 되돌려야 하고, 열 일부가 이미 있어도 다시 실행할 수 있어야 한다."""
+    import sqlite3
+
+    from reda import state as state_module
+    from reda.state import _SCHEMA, _SCHEMA_V2
+    path = tmp_path / 'state.db'
+    conn = sqlite3.connect(path)
+    conn.executescript(_SCHEMA + _SCHEMA_V2)
+    conn.execute('PRAGMA user_version = 2')
+    conn.commit()
+    conn.close()
+
+    broken = state_module._SCHEMA_V3 + '\nCREATE TABLE broken (;\n'
+    monkeypatch.setattr(state_module, '_SCHEMA_V3', broken)
+    with pytest.raises(sqlite3.OperationalError):
+        StateDB(path)
+    conn = sqlite3.connect(path)
+    columns = {r[1] for r in conn.execute('PRAGMA table_info(messages)')}
+    assert 'recipient_mode' not in columns                     # 되돌려졌다
+    assert conn.execute('PRAGMA user_version').fetchone()[0] == 2
+    # 예전 코드로 열 하나만 들어간 DB도 다시 이전할 수 있다
+    conn.execute('ALTER TABLE messages ADD COLUMN recipient_mode TEXT')
+    conn.commit()
+    conn.close()
+    monkeypatch.undo()
+    with StateDB(path) as db:
+        assert db.conn.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION

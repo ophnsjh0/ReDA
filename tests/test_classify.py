@@ -5,8 +5,9 @@ from types import SimpleNamespace
 import pytest
 from fakes import make_message
 
-from reda.classify import (SYSTEM_PROMPT, ClassifierUnavailable, LLMClassifier,
-                           parse_classification)
+from reda.classify import (ClassifierBusy, ClassifierRequestRejected,
+                           ClassifierUnavailable)
+from reda.classify.llm import SYSTEM_PROMPT, LLMClassifier, parse_classification
 from reda.classify.anthropic_llm import AnthropicComplete
 from reda.config import Settings
 from reda.mail import Mail
@@ -134,3 +135,240 @@ def test_anthropic_auth_error_stops_the_run():
         'bad key', response=httpx2.Response(401, request=request), body=None)
     with pytest.raises(ClassifierUnavailable):
         AnthropicComplete('claude-opus-5-5', client=FakeAnthropic(error=error))('sys', 'user')
+
+
+def _api_error(cls, status):
+    import httpx2
+    request = httpx2.Request('POST', 'https://api.anthropic.com/v1/messages')
+    return cls('x', response=httpx2.Response(status, request=request), body=None)
+
+
+def test_anthropic_bad_request_is_rejection_not_fatal():
+    # 이 메일 탓인지 설정 탓인지는 처리 흐름이 판단한다 (test_poll)
+    import anthropic
+    error = _api_error(anthropic.BadRequestError, 400)
+    with pytest.raises(ClassifierRequestRejected):
+        AnthropicComplete('claude-haiku-5-5', client=FakeAnthropic(error=error))('sys', 'user')
+
+
+@pytest.mark.parametrize('name,status', [('RateLimitError', 429), ('InternalServerError', 500),
+                                         ('OverloadedError', 529)])
+def test_anthropic_transient_errors_are_busy(name, status):
+    import anthropic
+    error = _api_error(getattr(anthropic, name), status)
+    with pytest.raises(ClassifierBusy):
+        AnthropicComplete('claude-opus-5-5', client=FakeAnthropic(error=error))('sys', 'user')
+
+
+def test_anthropic_missing_key_stops_before_any_request(monkeypatch):
+    monkeypatch.delenv('ANTHROPIC_API_KEY', raising=False)
+    monkeypatch.delenv('ANTHROPIC_AUTH_TOKEN', raising=False)
+    with pytest.raises(ClassifierUnavailable, match='ANTHROPIC_API_KEY'):
+        AnthropicComplete('claude-opus-5-5')
+
+
+def test_anthropic_empty_effort_is_not_sent():
+    fake = FakeAnthropic(_response('{"category": "참고", "urgency": "낮음", "reason": "x"}'))
+    AnthropicComplete('claude-haiku-5-5', '', client=fake)('sys', 'user')
+    assert 'effort' not in fake.kwargs['output_config']
+
+
+# ---------------------------------------------------------------- 제공자 고르기 (설정만으로 바꾼다)
+
+from reda import classify  # noqa: E402
+
+
+def _settings_with(monkeypatch, tmp_path, **env):
+    monkeypatch.setenv('REDA_DATA_DIR', str(tmp_path))
+    for key in ('REDA_CLASSIFIER', 'REDA_CLASSIFIER_MODEL', 'REDA_CLASSIFIER_EFFORT'):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    return Settings.from_env()
+
+
+def test_default_provider_is_anthropic_with_its_default_model(monkeypatch, tmp_path):
+    s = _settings_with(monkeypatch, tmp_path)
+    assert s.classifier == 'anthropic'
+    assert classify.model_for(s) == 'claude-opus-5-5'
+
+
+def test_model_setting_overrides_provider_default(monkeypatch, tmp_path):
+    s = _settings_with(monkeypatch, tmp_path, REDA_CLASSIFIER_MODEL='claude-sonnet-5-5')
+    assert classify.model_for(s) == 'claude-sonnet-5-5'
+
+
+def test_anthropic_classifier_name_includes_model(monkeypatch, tmp_path):
+    monkeypatch.setenv('ANTHROPIC_API_KEY', 'test-key')
+    s = _settings_with(monkeypatch, tmp_path, REDA_CLASSIFIER_MODEL='claude-sonnet-5-5')
+    assert classify.make_classifier(s).name == 'anthropic/claude-sonnet-5-5'
+
+
+def test_unknown_provider_stops_with_choices(monkeypatch, tmp_path):
+    s = _settings_with(monkeypatch, tmp_path, REDA_CLASSIFIER='gpt')
+    with pytest.raises(ClassifierUnavailable, match='anthropic, jev'):
+        classify.make_classifier(s)
+
+
+# ---------------------------------------------------------------- Jev 어댑터
+
+from reda.classify import jev  # noqa: E402
+
+
+class FakePost:
+    """jev.http_post 대신. 응답(status, body)을 차례로 돌려주고 요청을 남긴다."""
+
+    def __init__(self, *responses):
+        self.responses, self.calls = list(responses), []
+
+    def __call__(self, url, payload, headers):
+        self.calls.append((url, payload, headers))
+        return self.responses.pop(0)
+
+
+def jev_answer(choice, p, urgency='보통'):
+    other = '참고' if choice == '답장필요' else '답장필요'
+    return 200, {'model': 'jev-1.13.0', 'answers': {
+        'category': {'type': 'choice', 'choice': choice, 'confidence': 0.5,
+                     'probabilities': {choice: p, other: round(1 - p, 4)}},
+        'urgency': {'type': 'choice', 'choice': urgency, 'confidence': 0.4,
+                    'probabilities': {'높음': 0.1, '보통': 0.8, '낮음': 0.1}}},
+        'usage': {'input_tokens': 300, 'output_tokens': 10}}
+
+
+@pytest.fixture
+def jev_settings(monkeypatch, tmp_path):
+    return _settings_with(monkeypatch, tmp_path, REDA_CLASSIFIER='jev',
+                          REDA_MY_ADDRESSES='me@corp.example.com')
+
+
+def make_jev(settings, *responses):
+    post = FakePost(*responses)
+    return jev.JevClassifier(settings, api_key='test-key', post=post, sleep=lambda s: None), post
+
+
+def test_jev_request_shape_and_masking(jev_settings):
+    c, post = make_jev(jev_settings, jev_answer('답장필요', 0.93, '높음'))
+    body = '장비 192.0.2.10 계정: admin01 / 비밀번호: P@ssw0rd! 연락처 010-9876-5432'
+    result = c.classify(customer_mail(body))
+
+    assert (result.category, result.urgency) == ('답장필요', '높음')
+    assert result.confidence == pytest.approx(0.93)
+    url, payload, headers = post.calls[0]
+    assert url == 'https://api.typesafe.ai/v1/systemone'
+    assert headers['Authorization'] == 'Bearer test-key'
+    assert payload['model'] == 'jev-latest'
+    assert set(payload['questions']['category']['criteria']) == {'답장필요', '참고'}
+    assert payload['questions']['category']['type'] == 'choice'
+    assert set(payload['questions']['urgency']['criteria']) == {'높음', '보통', '낮음'}
+    sent = json.dumps(payload, ensure_ascii=False)
+    for secret in SECRETS:
+        assert secret not in sent
+    assert '[IP_1]' in payload['state']
+
+
+def test_jev_low_probability_becomes_check_needed(jev_settings):
+    c, _ = make_jev(jev_settings, jev_answer('참고', 0.55))
+    result = c.classify(customer_mail('확인 부탁드립니다'))
+    assert result.category == '확인필요'
+    assert '기준 0.70 미만' in result.reason
+
+
+def test_jev_threshold_is_configurable(monkeypatch, tmp_path):
+    s = _settings_with(monkeypatch, tmp_path, REDA_CLASSIFIER='jev', REDA_JEV_MIN_PROBABILITY='0.5')
+    c, _ = make_jev(s, jev_answer('참고', 0.55))
+    assert c.classify(customer_mail('공유드립니다')).category == '참고'
+
+
+@pytest.mark.parametrize('body', [{}, {'answers': {'category': {'choice': '전달'}}}])
+def test_jev_malformed_answer_becomes_check_needed(jev_settings, body):
+    c, _ = make_jev(jev_settings, (200, body))
+    assert c.classify(customer_mail('x')).category == '확인필요'
+
+
+def test_jev_retries_rate_limit_then_succeeds(jev_settings):
+    c, post = make_jev(jev_settings, (429, {}), (529, {}), jev_answer('참고', 0.9))
+    assert c.classify(customer_mail('x')).category == '참고'
+    assert len(post.calls) == 3
+
+
+def test_jev_persistent_rate_limit_is_busy_without_trailing_sleep(jev_settings):
+    sleeps = []
+    post = FakePost((429, {}), (429, {}), (429, {}))
+    c = jev.JevClassifier(jev_settings, api_key='k', post=post, sleep=sleeps.append)
+    with pytest.raises(ClassifierBusy):
+        c.classify(customer_mail('x'))
+    assert sleeps == [1, 2]                    # 마지막 시도 뒤에는 기다리지 않는다
+
+
+@pytest.mark.parametrize('status', [401, 403, 404])
+def test_jev_config_errors_stop_the_run(jev_settings, status):
+    c, _ = make_jev(jev_settings, (status, {}))
+    with pytest.raises(ClassifierUnavailable):
+        c.classify(customer_mail('x'))
+
+
+@pytest.mark.parametrize('status', [400, 413, 422])
+def test_jev_rejection_is_left_to_poll(jev_settings, status):
+    c, _ = make_jev(jev_settings, (status, {}))
+    with pytest.raises(ClassifierRequestRejected):
+        c.classify(customer_mail('x'))
+
+
+@pytest.mark.parametrize('status', [500, 502, 503])
+def test_jev_server_errors_are_busy(jev_settings, status):
+    c, _ = make_jev(jev_settings, (status, {}))
+    with pytest.raises(ClassifierBusy):
+        c.classify(customer_mail('x'))
+
+
+def test_jev_connection_failure_is_busy(jev_settings, monkeypatch):
+    import urllib.error
+    import urllib.request
+
+    def fail(*a, **k):
+        raise urllib.error.URLError('down')
+    monkeypatch.setattr(urllib.request, 'urlopen', fail)
+    with pytest.raises(ClassifierBusy):
+        jev.http_post(jev.ENDPOINT, {}, {})
+
+
+def test_jev_without_key_stops_the_run(jev_settings, monkeypatch):
+    monkeypatch.delenv('TYPESAFE_API_KEY', raising=False)
+    with pytest.raises(ClassifierUnavailable, match='TYPESAFE_API_KEY'):
+        classify.make_classifier(jev_settings)
+
+
+
+def test_customer_detected_from_address_with_comment(settings):
+    from reda.classify.mailtext import customer_of
+    m = Mail.from_gmail(make_message('m1', From='x@customer-a.example.com (Support)', To=ME_ADDR))
+    assert customer_of(m, settings.customer_domains) == '고객사A'
+
+
+ME_ADDR = 'me@corp.example.com'
+
+
+def test_llm_returns_addressee_and_prompt_asks_for_it(settings):
+    from reda.classify.llm import OUTPUT_SCHEMA
+    assert 'addressee' in OUTPUT_SCHEMA['required']
+    assert 'addressee' in SYSTEM_PROMPT
+    c = parse_classification(json.dumps({'category': '답장필요', 'urgency': '보통', 'reason': 'x',
+                                         'addressee': '  김철수 과장님 '}))
+    assert c.addressee == '김철수 과장님'
+    # 예전 형식(addressee 없음)도 받는다
+    assert parse_classification(json.dumps({'category': '참고', 'urgency': '낮음',
+                                            'reason': 'x'})).addressee == ''
+    assert parse_classification('[1, 2]').category == '확인필요'
+
+
+def test_recipient_note_tells_group_from_personal(monkeypatch, tmp_path):
+    monkeypatch.setenv('REDA_DATA_DIR', str(tmp_path))
+    monkeypatch.setenv('REDA_MY_ADDRESSES', 'me@corp.example.com')
+    monkeypatch.setenv('REDA_MY_GROUPS', 'tac-team@corp.example.com')
+    s = Settings.from_env()
+    llm = Recorder(json.dumps({'category': '참고', 'urgency': '낮음', 'reason': 'x', 'addressee': ''}))
+    m = Mail.from_gmail(make_message('m1', From='lee@customer-a.example.com',
+                                     To='tac-team@corp.example.com', Subject='문의', body='x'))
+    LLMClassifier(llm, s).classify(m)
+    assert '개인 주소 없이 소속 그룹 주소로 받음' in llm.calls[0][1]

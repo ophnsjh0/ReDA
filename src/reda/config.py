@@ -18,6 +18,33 @@ def _path(name, default):
     return Path(_env(name, str(default))).expanduser()
 
 
+class ConfigError(ValueError):
+    """설정 값이 잘못됨. 메시지에 고칠 항목 이름을 담는다."""
+
+
+def _addresses(name):
+    values = tuple(a.lower() for a in _list(name))
+    bad = [a for a in values if a.count('@') != 1 or a.startswith('@') or a.endswith('@')]
+    if bad:
+        raise ConfigError(f'{name}에 메일 주소가 아닌 값이 {len(bad)}개 있음 '
+                          f'(예: "{bad[0][:3]}…"). user@domain 형식으로 적는다')
+    return values
+
+
+def _float(name, default):
+    try:
+        return float(_env(name, str(default)))
+    except ValueError:
+        raise ConfigError(f'{name}는 숫자여야 함') from None
+
+
+def _probability(name, default):
+    value = _float(name, default)
+    if not 0.0 <= value <= 1.0:          # nan도 여기서 걸린다
+        raise ConfigError(f'{name}는 0과 1 사이 값이어야 함 (예: 0.7)')
+    return value
+
+
 def _list(name, default=''):
     return tuple(v.strip() for v in os.environ.get(name, default).split(',') if v.strip())
 
@@ -47,9 +74,19 @@ class Settings:
     reference_db: Path
     embedding_model: str
     openai_api_key: str
-    # 분류기(LLM 임시 구현). Jev 사양을 받으면 바뀐다. API 키는 ANTHROPIC_API_KEY.
-    classifier_model: str
-    classifier_effort: str
+    # 분류기. 제공자(anthropic / jev)와 모델은 설정으로만 바꾼다 (reda/classify/__init__.py 표)
+    classifier: str
+    classifier_model: str          # 비우면 제공자 기본 모델
+    classifier_effort: str         # anthropic만. 비우면 보내지 않는다
+    jev_min_probability: float     # jev만. 고른 분류의 확률이 이보다 낮으면 확인필요
+    # 내가 속한 그룹(팀 메일) 주소. 그룹 주소로만 받은 요청은 담당자 단서가 있어야 답장필요다 (결정 2-5).
+    # 헤더(List-Id, 그룹이 바꾼 From)로 알아낼 수 있는 그룹은 적지 않아도 된다
+    my_groups: tuple[str, ...] = ()
+    # 이름 프로필 (결정 2-6). 개발용 설정이다. 비우면 표시 이름은 Gmail 보내는 이름(sendAs)에서 가져온다.
+    # 배포 때는 메일함에서 자동으로 채우고 메신저로 확인받는다 (결정 6-3)
+    my_name: str = ''
+    my_titles: tuple[str, ...] = ()      # 직함 (예: 부장). '이름 + 직함' 호칭 판정에 쓴다
+    my_aliases: tuple[str, ...] = ()     # 그 밖에 불리는 이름 (영문 이름 등)
 
     @classmethod
     def from_env(cls):
@@ -58,13 +95,19 @@ class Settings:
             data_dir=data_dir,
             gmail_credentials_file=_path('REDA_GMAIL_CREDENTIALS_FILE', data_dir / 'credentials.json'),
             gmail_token_file=_path('REDA_GMAIL_TOKEN_FILE', data_dir / 'token.json'),
-            my_addresses=tuple(a.lower() for a in _list('REDA_MY_ADDRESSES')),
+            my_addresses=_addresses('REDA_MY_ADDRESSES'),
             customer_domains=_mapping('REDA_CUSTOMER_DOMAINS'),
             exclude_subjects=_list('REDA_EXCLUDE_SUBJECTS'),
             reference_docs_dir=_path('REDA_REFERENCE_DOCS_DIR', data_dir / 'reference_docs'),
             reference_db=_path('REDA_REFERENCE_DB', data_dir / 'references.db'),
             embedding_model=_env('REDA_EMBEDDING_MODEL', 'text-embedding-3-small'),
             openai_api_key=_env('OPENAI_API_KEY'),
-            classifier_model=_env('REDA_CLASSIFIER_MODEL', 'claude-opus-5-5'),
-            classifier_effort=_env('REDA_CLASSIFIER_EFFORT', 'low'),
+            classifier=_env('REDA_CLASSIFIER', 'anthropic').lower(),
+            classifier_model=_env('REDA_CLASSIFIER_MODEL'),
+            classifier_effort=os.environ.get('REDA_CLASSIFIER_EFFORT', 'low').strip(),
+            jev_min_probability=_probability('REDA_JEV_MIN_PROBABILITY', 0.7),
+            my_groups=_addresses('REDA_MY_GROUPS'),
+            my_name=_env('REDA_MY_NAME'),
+            my_titles=_list('REDA_MY_TITLES'),
+            my_aliases=_list('REDA_MY_ALIASES'),
         )

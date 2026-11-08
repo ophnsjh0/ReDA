@@ -4,12 +4,13 @@
 missed_replies)는 분류 정확도 측정(목표: 답장필요 누락률 5% 이하)에 쓴다.
 """
 import json
+import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (
@@ -18,7 +19,7 @@ CREATE TABLE IF NOT EXISTS messages (
     category    TEXT NOT NULL,          -- 답장필요 / 참고 / 확인필요
     urgency     TEXT,                   -- 높음 / 보통 / 낮음
     reason      TEXT,
-    source      TEXT NOT NULL,          -- rule(규칙 필터) / classifier(분류기)
+    source      TEXT NOT NULL,          -- rule(규칙 필터) / classifier:<제공자/모델>
     labeled_at  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id);
@@ -70,8 +71,62 @@ CREATE TABLE IF NOT EXISTS failures (
 """
 
 
+# 3: 사용자 정보 (결정 2-7, 구현계획 "사용자 정보 저장"). 메일 본문은 저장하지 않는다.
+_SCHEMA_V3 = """
+ALTER TABLE messages ADD COLUMN recipient_mode TEXT;   -- personal_to / group_to / personal_cc / group_cc / hidden
+ALTER TABLE messages ADD COLUMN addressee TEXT;        -- 분류기가 추출한 인사말 대상
+ALTER TABLE messages ADD COLUMN addressee_match TEXT;  -- me / other / none / unknown
+
+CREATE TABLE IF NOT EXISTS user_profile (
+    key         TEXT PRIMARY KEY,       -- display_name, titles, ...
+    value       TEXT NOT NULL,
+    source      TEXT NOT NULL,          -- config / sendas / signature / user / directory
+    updated_at  TEXT NOT NULL
+);
+
+-- 나를 부르는 이름. 후보는 쓰면서 쌓이고, 확정된 것만 판정에 쓴다
+CREATE TABLE IF NOT EXISTS identity_aliases (
+    alias       TEXT NOT NULL,
+    kind        TEXT NOT NULL,          -- display_name / alias
+    source      TEXT NOT NULL,          -- config / sendas / greeting / user / directory
+    status      TEXT NOT NULL CHECK (status IN ('candidate', 'confirmed', 'rejected')),
+    hits        INTEGER NOT NULL DEFAULT 0,
+    last_seen   TEXT,
+    created_at  TEXT NOT NULL,
+    PRIMARY KEY (alias, kind)
+);
+
+-- 내가 맡은 것 (고객사, 제조사, 제품, 케이스 번호, 그룹). 6단계부터 채운다
+CREATE TABLE IF NOT EXISTS responsibilities (
+    value       TEXT NOT NULL,
+    kind        TEXT NOT NULL CHECK (kind IN ('customer', 'vendor', 'product', 'case', 'group')),
+    source      TEXT NOT NULL,
+    status      TEXT NOT NULL CHECK (status IN ('candidate', 'confirmed', 'rejected')),
+    hits        INTEGER NOT NULL DEFAULT 0,
+    last_seen   TEXT,
+    created_at  TEXT NOT NULL,
+    PRIMARY KEY (value, kind)
+);
+
+-- 사용자 피드백 ([내 일 아님] 버튼, 별칭 확인 등). 본문 없이 메일 ID와 특징만 남긴다
+CREATE TABLE IF NOT EXISTS feedback (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id  TEXT,
+    kind        TEXT NOT NULL,
+    detail      TEXT NOT NULL DEFAULT '{}',   -- JSON
+    observed_at TEXT NOT NULL
+);
+"""
+
+
 def _now():
     return datetime.now(timezone.utc).isoformat(timespec='seconds')
+
+
+def _statements(script):
+    """SQL 묶음을 문장으로 나눈다. 주석(--)은 지운다. 문자열 안의 ;는 쓰지 않는다."""
+    lines = [line.split('--', 1)[0] for line in script.splitlines()]
+    return [s.strip() for s in '\n'.join(lines).split(';') if s.strip()]
 
 
 class StateDB:
@@ -119,6 +174,22 @@ class StateDB:
             with self.conn:
                 self.conn.executescript(_SCHEMA_V2)
                 self.conn.execute('PRAGMA user_version = 2')
+        if version < 3:
+            # 한 트랜잭션으로 묶는다. sqlite3 모듈은 DDL 앞에 BEGIN을 넣지 않으므로 직접 연다.
+            # 도중에 실패하면 되돌리고, 이미 있는 열은 건너뛰어 다시 실행해도 된다
+            self.conn.execute('BEGIN IMMEDIATE')
+            try:
+                columns = {r['name'] for r in self.conn.execute('PRAGMA table_info(messages)')}
+                for statement in _statements(_SCHEMA_V3):
+                    added = re.match(r'ALTER TABLE messages ADD COLUMN (\w+)', statement)
+                    if added and added.group(1) in columns:
+                        continue
+                    self.conn.execute(statement)
+                self.conn.execute('PRAGMA user_version = 3')
+                self.conn.execute('COMMIT')
+            except BaseException:
+                self.conn.execute('ROLLBACK')
+                raise
 
     # ------------------------------------------------------------ sync
     def get_sync(self, key, default=None):
@@ -137,15 +208,20 @@ class StateDB:
 
     # ------------------------------------------------------------ messages
     def record_classification(self, message_id, thread_id, category, *, urgency=None,
-                              reason=None, source='classifier'):
+                              reason=None, source='classifier', recipient_mode=None,
+                              addressee=None, addressee_match=None):
         with self.conn:
             self.conn.execute(
                 'INSERT INTO messages(message_id, thread_id, category, urgency, reason, source,'
-                ' labeled_at) VALUES (?, ?, ?, ?, ?, ?, ?) '
+                ' labeled_at, recipient_mode, addressee, addressee_match)'
+                ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) '
                 'ON CONFLICT(message_id) DO UPDATE SET category = excluded.category,'
                 ' urgency = excluded.urgency, reason = excluded.reason,'
-                ' source = excluded.source, labeled_at = excluded.labeled_at',
-                (message_id, thread_id, category, urgency, reason, source, _now()))
+                ' source = excluded.source, labeled_at = excluded.labeled_at,'
+                ' recipient_mode = excluded.recipient_mode, addressee = excluded.addressee,'
+                ' addressee_match = excluded.addressee_match',
+                (message_id, thread_id, category, urgency, reason, source, _now(),
+                 recipient_mode, addressee, addressee_match))
 
     def get_message(self, message_id):
         return self.conn.execute(
@@ -159,6 +235,39 @@ class StateDB:
             'SELECT category FROM messages WHERE thread_id = ? ORDER BY labeled_at',
             (thread_id,)).fetchall()
         return [r['category'] for r in rows]
+
+    # ------------------------------------------------------------ 사용자 정보
+    def get_profile(self, key):
+        row = self.conn.execute('SELECT value FROM user_profile WHERE key = ?', (key,)).fetchone()
+        return row['value'] if row else None
+
+    def set_profile(self, key, value, *, source):
+        with self.conn:
+            self.conn.execute(
+                'INSERT INTO user_profile(key, value, source, updated_at) VALUES (?, ?, ?, ?) '
+                'ON CONFLICT(key) DO UPDATE SET value = excluded.value, source = excluded.source,'
+                ' updated_at = excluded.updated_at', (key, str(value), source, _now()))
+
+    def upsert_alias(self, alias, kind, source, status='confirmed'):
+        """없으면 더한다. 이미 있으면 상태를 바꾸지 않는다 (사용자가 거절한 별칭을 되살리지 않는다)."""
+        if status not in ('candidate', 'confirmed', 'rejected'):
+            raise ValueError(f'별칭 상태는 candidate/confirmed/rejected만 됩니다: {status!r}')
+        with self.conn:
+            self.conn.execute(
+                'INSERT OR IGNORE INTO identity_aliases(alias, kind, source, status, created_at)'
+                ' VALUES (?, ?, ?, ?, ?)', (alias, kind, source, status, _now()))
+
+    def set_alias_status(self, alias, kind, status):
+        if status not in ('candidate', 'confirmed', 'rejected'):
+            raise ValueError(f'별칭 상태는 candidate/confirmed/rejected만 됩니다: {status!r}')
+        with self.conn:
+            self.conn.execute('UPDATE identity_aliases SET status = ? WHERE alias = ? AND kind = ?',
+                              (status, alias, kind))
+
+    def aliases(self, status='confirmed'):
+        return self.conn.execute(
+            'SELECT * FROM identity_aliases WHERE status = ? ORDER BY created_at, alias',
+            (status,)).fetchall()
 
     # ------------------------------------------------------------ drafts
     def record_draft(self, draft_id, message_id, thread_id, evidence):

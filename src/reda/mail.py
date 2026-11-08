@@ -4,11 +4,6 @@ from email.utils import getaddresses, parseaddr
 
 from reda.gmail.client import extract_body, get_header
 
-# 규칙 필터에 필요한 헤더. format='metadata'로 가져올 때 이 목록을 쓴다.
-RULE_HEADERS = ('From', 'To', 'Cc', 'Subject', 'Date', 'Reply-To', 'X-Original-Sender',
-                'Precedence', 'Auto-Submitted')
-
-
 def parse_addresses(*values):
     """주소 헤더 값들에서 소문자 주소 목록을 뽑는다.
 
@@ -41,6 +36,8 @@ class Mail:
     date: str = ''
     precedence: str = ''
     auto_submitted: str = ''
+    list_id: str = ''                    # 그룹(메일링 리스트)으로 받은 메일. 예: '<team.corp.example.com>'
+    return_path: str = ''
     body: str = ''                       # format='full'일 때만 채워진다
 
     @classmethod
@@ -61,9 +58,33 @@ class Mail:
             date=h('Date'),
             precedence=h('Precedence').strip().lower(),
             auto_submitted=h('Auto-Submitted').strip().lower(),
+            list_id=h('List-Id').strip().lower(),
+            return_path=address_of(h('Return-Path')),
             body=extract_body(payload),  # format='metadata'면 본문이 없어 ''
         )
 
     @property
     def sender_address(self):
         return address_of(self.sender)
+
+
+def group_addresses(mail, my_addresses):
+    """이 메일을 나에게 전달한 그룹 주소. 설정에 그룹 주소를 적지 않아도 헤더로 알아낸다.
+
+    - List-Id `<team.corp.example.com>`이고 내 주소 도메인이 corp.example.com이면 team@corp.example.com
+    - 그룹 중계로 From이 바뀐 메일(X-Original-Sender가 From과 다름)이면 From 주소가 그룹 주소다
+    """
+    groups = set()
+    if mail.list_id:
+        name = mail.list_id.split('<')[-1].strip('> ')
+        # 내 도메인이 여럿이면(corp.example.com, example.com) 가장 긴 도메인 하나만 쓴다
+        domains = [d for d in {a.split('@', 1)[1] for a in my_addresses if '@' in a}
+                   if name.endswith('.' + d)]
+        if domains:
+            domain = max(domains, key=len)
+            groups.add(f'{name[:-len(domain) - 1]}@{domain}')
+    original = address_of(mail.original_sender)
+    if original and mail.sender_address and original != mail.sender_address:
+        groups.add(mail.sender_address)
+    return groups
+
