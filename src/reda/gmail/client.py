@@ -139,6 +139,13 @@ def add_labels(service, message_id, label_ids):
         userId='me', id=message_id, body={'addLabelIds': list(label_ids)}).execute()
 
 
+def replace_labels(service, message_id, add_ids, remove_ids):
+    """라벨을 붙이고 뗀다 (예: 답장필요 → 확인필요)."""
+    execute(service.users().messages().modify(
+        userId='me', id=message_id,
+        body={'addLabelIds': list(add_ids), 'removeLabelIds': list(remove_ids)}))
+
+
 # ---------------------------------------------------------------- 답장 초안
 
 _RE_REPLY_SUBJECT = re.compile(r'^\s*(re|답장)\s*:', re.IGNORECASE)

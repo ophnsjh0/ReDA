@@ -49,7 +49,9 @@ class FakeGmail:
         self.broken = set(broken)
         self.display_name = display_name
         self.threads = dict(threads or {})
+        self.drafts = []            # drafts.create로 만든 초안 (요청 본문)
         self.modified = []          # (message_id, 붙인 라벨 이름 목록)
+        self.removed = []           # (message_id, 뗀 라벨 이름 목록)
         self.calls = []
 
     def users(self):
@@ -60,6 +62,7 @@ class FakeGmail:
             'messages': _Resource({'list': self._messages_list, 'get': self._messages_get,
                                    'modify': self._messages_modify}),
             'threads': _Resource({'get': self._threads_get}),
+            'drafts': _Resource({'create': self._drafts_create}),
             'settings': _Resource({'sendAs': _Resource({'list': self._send_as_list})}),
         })
 
@@ -67,6 +70,10 @@ class FakeGmail:
         self.calls.append(('sendAs.list',))
         return {'sendAs': [{'sendAsEmail': 'me@corp.example.com', 'isPrimary': True,
                             'displayName': self.display_name}]}
+
+    def _drafts_create(self, userId, body):
+        self.drafts.append(body)
+        return {'id': f'draft-{len(self.drafts)}', 'message': {'threadId': body['message']['threadId']}}
 
     def _threads_get(self, userId, id, format='full'):
         self.calls.append(('threads.get', id))
@@ -88,9 +95,13 @@ class FakeGmail:
     def _messages_modify(self, userId, id, body):
         names = [self.labels[i] for i in body.get('addLabelIds', [])]
         self.modified.append((id, names))
+        removed = [self.labels[i] for i in body.get('removeLabelIds', [])]
+        if removed:
+            self.removed.append((id, removed))
         msg = self.messages.get(id)
         if msg is not None:
-            msg['labelIds'] = list(msg.get('labelIds', [])) + list(body.get('addLabelIds', []))
+            kept = [i for i in msg.get('labelIds', []) if i not in body.get('removeLabelIds', [])]
+            msg['labelIds'] = kept + list(body.get('addLabelIds', []))
         return {'id': id}
 
     def _get_profile(self, userId):

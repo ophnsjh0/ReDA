@@ -266,6 +266,19 @@ class StateDB:
     def profile_rows(self):
         return self.conn.execute('SELECT * FROM user_profile ORDER BY key').fetchall()
 
+    def record_feedback(self, kind, *, message_id=None, detail=None):
+        """사용자·에이전트 피드백 (초안 보류, [내 일 아님] 버튼 등). 본문은 넣지 않는다."""
+        with self.conn:
+            self.conn.execute(
+                'INSERT INTO feedback(message_id, kind, detail, observed_at) VALUES (?, ?, ?, ?)',
+                (message_id, kind, json.dumps(detail or {}, ensure_ascii=False), _now()))
+
+    def feedback(self, kind=None):
+        if kind is None:
+            return self.conn.execute('SELECT * FROM feedback ORDER BY id').fetchall()
+        return self.conn.execute('SELECT * FROM feedback WHERE kind = ? ORDER BY id',
+                                 (kind,)).fetchall()
+
     def upsert_alias(self, alias, kind, source, status='confirmed'):
         """없으면 더한다. 이미 있으면 상태를 바꾸지 않는다 (사용자가 거절한 별칭을 되살리지 않는다)."""
         if status not in ('candidate', 'confirmed', 'rejected'):
