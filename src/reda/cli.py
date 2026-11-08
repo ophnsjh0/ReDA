@@ -81,16 +81,17 @@ def cmd_poll(args):
 
 
 def _maybe_send_alerts(service, state, settings):
-    """새로 분류한 급한 메일(답장필요·확인필요, 긴급도 높음)을 바로 알린다. 실패해도 분류에는 영향 없음."""
+    """새로 분류한 급한 메일(답장필요·확인필요, 긴급도 높음)과 일정 메일을 바로 알린다.
+    실패해도 분류에는 영향 없음."""
     from reda import summary
-    if not settings.urgent_alert:
+    if not (settings.urgent_alert or settings.schedule_alert):
         return
     try:
         sent = summary.send_alerts(service, state, settings)
         if sent:
-            print(f'급한 메일 {sent}통을 알렸습니다.')
+            print(f'급한 메일·일정 메일 {sent}통을 알렸습니다.')
     except Exception as exc:
-        print(f'급한 메일 알림 오류: {exc.__class__.__name__}: {exc}', file=sys.stderr)
+        print(f'바로 알림 오류: {exc.__class__.__name__}: {exc}', file=sys.stderr)
 
 
 def _maybe_send_summary(service, state, settings):
@@ -154,12 +155,12 @@ def cmd_alert(args):
     service = client.get_gmail_service(settings)
     after = (datetime.now(timezone.utc) - timedelta(hours=args.hours)).isoformat(timespec='seconds')
     with StateDB.open(settings) as state:
-        items, _ = summary.urgent(state, after=after)
-        if not items:
-            print(f'최근 {args.hours}시간에 분류한 급한 메일이 없습니다 (답장필요·확인필요 중 긴급도 높음).')
+        items, schedules, _ = summary.alerts(state, after=after)
+        if not (items or schedules):
+            print(f'최근 {args.hours}시간에 분류한 급한 메일·일정 메일이 없습니다.')
             return 0
-        summary.fill_headers(service, summary.Summary(since=after, items=items))
-        text = summary.render_alert(items)
+        summary.fill_headers(service, summary.Summary(since=after, items=items + schedules))
+        text = summary.render_alert(items, schedules)
         print(text)
         if args.send:
             try:
@@ -412,7 +413,7 @@ def build_parser():
     summary.add_argument('--send', action='store_true', help='메신저로 보내고 지난 요약 시점을 옮긴다')
     summary.set_defaults(func=cmd_summary)
 
-    alert = sub.add_parser('alert', help='급한 메일 알림 미리 보기 (--send면 메신저로 보냄, 시험용)')
+    alert = sub.add_parser('alert', help='급한 메일·일정 메일 알림 미리 보기 (--send면 메신저로 보냄, 시험용)')
     alert.add_argument('--hours', type=int, default=24, help='최근 N시간에 분류한 메일 (기본 24)')
     alert.add_argument('--send', action='store_true', help='메신저로 보낸다 (자동 알림 기준점은 그대로)')
     alert.set_defaults(func=cmd_alert)

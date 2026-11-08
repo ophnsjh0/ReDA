@@ -129,6 +129,8 @@ class Settings:
     # 급한 메일 알림 (4단계). 켜면 `reda poll`이 새로 분류한 답장필요·확인필요 중 긴급도 높음을
     # 바로 메신저로 알린다 (요약과 같은 프로필·대상)
     urgent_alert: bool = False
+    # 일정 메일 바로 알림 (9단계 버튼 제안 전까지는 알림만). 정하지 않으면 urgent_alert를 따른다
+    schedule_alert: bool = False
 
     @classmethod
     def from_env(cls):
@@ -162,4 +164,6 @@ class Settings:
             summary_profile=_env('REDA_SUMMARY_PROFILE', _env('REDA_DRAFT_PROFILE', 'reda-dev')),
             summary_to=_env('REDA_SUMMARY_TO', 'telegram'),
             urgent_alert=_env('REDA_URGENT_ALERT', 'false').lower() in ('1', 'true', 'yes', 'on'),
+            schedule_alert=_env('REDA_SCHEDULE_ALERT', _env('REDA_URGENT_ALERT', 'false')).lower()
+            in ('1', 'true', 'yes', 'on'),
         )

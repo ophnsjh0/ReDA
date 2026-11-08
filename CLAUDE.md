@@ -45,7 +45,7 @@ uv run reda golden eval --all # 정답 없는 메일도 분류해 결과 파일�
 sh scripts/local_poll_agent.sh install   # 개발용 Mac에서 15분마다 reda poll (끄기: uninstall, 상태: status)
 uv run reda draft-pending --dry-run      # 자동 초안에 맡길 메일 보기 (빼면 실제로 맡긴다, 발송 없음)
 uv run reda summary --hours 24           # 출근 전 요약 보기 (--send면 메신저로 보냄)
-uv run reda alert --hours 24             # 급한 메일 알림 미리 보기 (REDA_URGENT_ALERT면 poll이 바로 알림)
+uv run reda alert --hours 24             # 급한 메일·일정 메일 알림 미리 보기 (REDA_URGENT_ALERT·REDA_SCHEDULE_ALERT면 poll이 바로 알림)
 ```
 
 - 공개 저장소 위생 검사: `python3 -I scripts/check_public.py`. 운영 값은 git 제외 파일 `.claude/sensitive-patterns.local`(한 줄에 정규식 하나)에서 읽는다. 커밋할 때 자동으로 돈다: Claude Code의 PreToolUse hook(`.claude/settings.json`)과 로컬 git pre-commit hook(`.git/hooks/pre-commit`, git에 올라가지 않음). 새로 clone하면 pre-commit hook을 다시 설치해야 한다.

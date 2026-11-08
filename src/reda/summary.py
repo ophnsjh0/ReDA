@@ -146,44 +146,70 @@ def render(summary, *, period='지난 요약 이후'):
     return '\n'.join(lines)
 
 
-def urgent(state, *, after):
-    """after(labeled_at) 뒤에 분류한 메일 중 알릴 것과 새 기준점. 기준점은 본 메일의 마지막 labeled_at."""
+def alerts(state, *, after):
+    """after(labeled_at) 뒤에 분류한 메일 중 바로 알릴 것. (급한 메일, 일정 메일, 새 기준점)
+    - 급한 메일: 답장필요·확인필요 중 긴급도 높음
+    - 일정 메일: 일정 표시가 붙은 메일 (분류와 관계없이, 급한 메일로 이미 알리는 것은 뺀다)
+    기준점은 본 메일의 마지막 labeled_at."""
     rows = state.conn.execute(
         'SELECT * FROM messages WHERE labeled_at > ? ORDER BY labeled_at', (after,)).fetchall()
     now = datetime.now(timezone.utc)
-    items = [_item(state, row, now) for row in rows
-             if row['category'] in URGENT_CATEGORIES and row['urgency'] == '높음']
-    return sorted(items, key=lambda i: -i.priority), (rows[-1]['labeled_at'] if rows else after)
+    items = [_item(state, row, now) for row in rows]
+    urgent_items = [i for i in items if i.category in URGENT_CATEGORIES and i.urgency == '높음']
+    schedules = [i for i in items if i.todo == '일정' and i not in urgent_items]
+    mark = rows[-1]['labeled_at'] if rows else after
+    return sorted(urgent_items, key=lambda i: -i.priority), schedules, mark
 
 
-def render_alert(items):
-    head = f'🚨 급한 메일 {len(items)}통'
-    lines = [head]
+def urgent(state, *, after):
+    urgent_items, _, mark = alerts(state, after=after)
+    return urgent_items, mark
+
+
+_KIND = {LABEL_REPLY: '답장 필요', LABEL_CHECK: '직접 확인 필요', LABEL_FYI: '참고'}
+
+
+def _alert_lines(items):
+    lines = []
     for n, item in enumerate(items[:LIST_MAX], 1):
-        what = '답장 필요' if item.category == LABEL_REPLY else '직접 확인 필요'
-        extra = f', {item.draft}' if item.draft else ''
-        lines.append(f'{n}. [{what}{extra}] {item.subject} — {item.sender}')
+        what = _KIND.get(item.category, item.category) + (f', {item.draft}' if item.draft else '')
+        lines.append(f'{n}. [{what}] {item.subject} — {item.sender}')
         lines.append(f'  {gmail_link(item.thread_id)}')
     if len(items) > LIST_MAX:
         lines.append(f'… 외 {len(items) - LIST_MAX}통')
+    return lines
+
+
+def render_alert(items, schedules=()):
+    lines = []
+    if items:
+        lines += [f'🚨 급한 메일 {len(items)}통'] + _alert_lines(items)
+    if schedules:
+        lines += ([''] if lines else []) + [
+            f'📅 일정이 있는 메일 {len(schedules)}통 (캘린더 등록은 준비 중, 9단계에서 버튼으로 제안)']
+        lines += _alert_lines(schedules)
     return '\n'.join(lines)
 
 
 def send_alerts(service, state, settings, *, sender=None):
-    """새로 분류한 급한 메일을 알린다. 보낸 수를 돌려준다. 처음이면 기준점만 잡는다.
-    보내기에 실패하면 기준점을 옮기지 않아 다음 실행에서 다시 알린다."""
+    """새로 분류한 급한 메일·일정 메일을 알린다. 알린 메일 수를 돌려준다. 처음이면 기준점만 잡는다.
+    보내기에 실패하면 기준점을 옮기지 않아 다음 실행에서 다시 알린다.
+    settings.urgent_alert / schedule_alert로 종류마다 켜고 끈다 (settings가 None이면 둘 다)."""
     sender = sender or deliver
     after = state.get_sync(ALERT_KEY)
     if after is None:
         state.set_sync(ALERT_KEY, datetime.now(timezone.utc).isoformat(timespec='seconds'))
         return 0
-    items, mark = urgent(state, after=after)
-    if items:
-        fill_headers(service, Summary(since=after, items=items))
-        sender(settings, render_alert(items))
+    items, schedules, mark = alerts(state, after=after)
+    if settings is not None:
+        items = items if settings.urgent_alert else []
+        schedules = schedules if settings.schedule_alert else []
+    if items or schedules:
+        fill_headers(service, Summary(since=after, items=items + schedules))
+        sender(settings, render_alert(items, schedules))
     if mark != after:
         state.set_sync(ALERT_KEY, mark)
-    return len(items)
+    return len(items) + len(schedules)
 
 
 def since_for(state, *, hours=None, now=None):

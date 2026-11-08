@@ -154,3 +154,47 @@ def test_urgent_alert_setting(monkeypatch, tmp_path):
     assert Settings.from_env().urgent_alert is False
     monkeypatch.setenv('REDA_URGENT_ALERT', 'true')
     assert Settings.from_env().urgent_alert is True
+
+
+def test_schedule_alert_lists_schedule_mails_once(state):
+    state.set_sync(summary.ALERT_KEY, '2000-01-01T00:00:00+00:00')
+    seed(state)                         # r1: 급함 + 일정 → 급한 메일 쪽에만
+    state.record_classification('s1', 't-s1', '참고', urgency='낮음', source='classifier:jev',
+                                detail={'todo': '일정'})
+    state.record_classification('s2', 't-s2', '답장필요', urgency='보통', source='classifier:jev',
+                                detail={'todo': '일정'})
+    service = gmail()
+    for mid in ('s1', 's2'):
+        service.messages[mid] = make_message(mid, thread_id=f't-{mid}', From='홍과장 <hong@cust.example.com>',
+                                             Subject=f'점검 일정 {mid}')
+    sent = []
+    assert summary.send_alerts(service, state, None, sender=lambda s, t: sent.append(t)) == 3
+    text = sent[0]
+    urgent_part, schedule_part = text.split('📅', 1)
+    assert '제목 r1' in urgent_part and '제목 r1' not in schedule_part
+    assert '일정이 있는 메일 2통' in schedule_part
+    assert '[참고] 점검 일정 s1' in schedule_part and '[답장 필요] 점검 일정 s2' in schedule_part
+    assert '제목 f2' not in text        # 할 일 표시는 바로 알리지 않는다 (요약에만)
+
+
+def test_alert_kinds_follow_settings(state):
+    state.set_sync(summary.ALERT_KEY, '2000-01-01T00:00:00+00:00')
+    state.record_classification('s1', 't-s1', '참고', urgency='낮음', source='classifier:jev',
+                                detail={'todo': '일정'})
+    state.record_classification('r1', 't-r1', '답장필요', urgency='높음', source='classifier:jev')
+    service = FakeGmail(messages={m: make_message(m, thread_id=f't-{m}', From='a <a@cust.example.com>',
+                                                  Subject=f'메일 {m}') for m in ('s1', 'r1')})
+    sent = []
+    only_urgent = SimpleNamespace(urgent_alert=True, schedule_alert=False)
+    assert summary.send_alerts(service, state, only_urgent, sender=lambda s, t: sent.append(t)) == 1
+    assert '메일 r1' in sent[0] and '📅' not in sent[0]
+
+
+def test_schedule_alert_setting_defaults_to_urgent(monkeypatch, tmp_path):
+    monkeypatch.setenv('REDA_ENV_FILE', str(tmp_path / 'none.env'))
+    monkeypatch.setenv('REDA_MY_ADDRESSES', ME)
+    monkeypatch.setenv('REDA_URGENT_ALERT', 'true')
+    monkeypatch.delenv('REDA_SCHEDULE_ALERT', raising=False)
+    assert Settings.from_env().schedule_alert is True
+    monkeypatch.setenv('REDA_SCHEDULE_ALERT', 'false')
+    assert Settings.from_env().schedule_alert is False
