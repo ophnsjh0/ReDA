@@ -38,6 +38,21 @@ def _float(name, default):
         raise ConfigError(f'{name}는 숫자여야 함') from None
 
 
+def _hhmm(name):
+    value = _env(name)
+    if not value:
+        return ''
+    parts = value.split(':')
+    try:
+        hour, minute = (int(p) for p in parts)
+        valid = len(parts) == 2 and 0 <= hour < 24 and 0 <= minute < 60
+    except ValueError:
+        valid = False
+    if not valid:
+        raise ConfigError(f'{name}는 HH:MM 형식이어야 함 (예: 08:20)')
+    return f'{hour:02d}:{minute:02d}'
+
+
 def _int(name, default):
     try:
         value = int(_env(name, str(default)))
@@ -106,6 +121,14 @@ class Settings:
     draft_max_per_run: int = 2            # 한 번에 맡기는 메일 수 (15분 실행 안에 끝나게)
     draft_timeout: int = 300              # 메일 한 통에 기다리는 초
     hermes_bin: str = ''                  # 비우면 PATH와 ~/.local/bin에서 찾는다
+    # 출근 전 요약 (4단계, 결정 4-1). summary_at(HH:MM, 이 컴퓨터 시각)이 지나면 그날 처음 도는
+    # `reda poll`이 요약을 보낸다. 비우면 자동으로 보내지 않는다 (`reda summary --send`로 직접)
+    summary_at: str = ''
+    summary_profile: str = 'reda-dev'     # 메신저 봇이 연결된 Hermes 프로필
+    summary_to: str = 'telegram'          # hermes send --to 대상 (기본 대화방)
+    # 급한 메일 알림 (4단계). 켜면 `reda poll`이 새로 분류한 답장필요·확인필요 중 긴급도 높음을
+    # 바로 메신저로 알린다 (요약과 같은 프로필·대상)
+    urgent_alert: bool = False
 
     @classmethod
     def from_env(cls):
@@ -135,4 +158,8 @@ class Settings:
             draft_max_per_run=_int('REDA_DRAFT_MAX_PER_RUN', 2),
             draft_timeout=_int('REDA_DRAFT_TIMEOUT', 300),
             hermes_bin=_env('REDA_HERMES_BIN'),
+            summary_at=_hhmm('REDA_SUMMARY_AT'),
+            summary_profile=_env('REDA_SUMMARY_PROFILE', _env('REDA_DRAFT_PROFILE', 'reda-dev')),
+            summary_to=_env('REDA_SUMMARY_TO', 'telegram'),
+            urgent_alert=_env('REDA_URGENT_ALERT', 'false').lower() in ('1', 'true', 'yes', 'on'),
         )

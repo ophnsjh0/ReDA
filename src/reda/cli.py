@@ -61,6 +61,8 @@ def cmd_poll(args):
                                   identity=identity)
                 drafts = (_run_drafts(service, state, settings, quiet=True)
                           if settings.auto_draft else None)
+                _maybe_send_alerts(service, state, settings)
+                _maybe_send_summary(service, state, settings)
     except AlreadyRunning:
         print('이전 실행이 아직 끝나지 않아 이번 실행은 건너뜁니다.')
         return 0
@@ -75,6 +77,97 @@ def cmd_poll(args):
     print(f'측정 기록: 라벨 변경 {result.label_events}건, 놓친 답장 {result.missed_replies}건')
     if drafts is not None:
         _print_drafts(drafts)
+    return 0
+
+
+def _maybe_send_alerts(service, state, settings):
+    """새로 분류한 급한 메일(답장필요·확인필요, 긴급도 높음)을 바로 알린다. 실패해도 분류에는 영향 없음."""
+    from reda import summary
+    if not settings.urgent_alert:
+        return
+    try:
+        sent = summary.send_alerts(service, state, settings)
+        if sent:
+            print(f'급한 메일 {sent}통을 알렸습니다.')
+    except Exception as exc:
+        print(f'급한 메일 알림 오류: {exc.__class__.__name__}: {exc}', file=sys.stderr)
+
+
+def _maybe_send_summary(service, state, settings):
+    """정한 시각이 지났고 오늘 아직 안 보냈으면 요약을 보낸다. 실패해도 분류에는 영향 없음."""
+    from reda import summary
+    if not summary.due(settings, state):
+        return
+    try:
+        _send_summary(service, state, settings)
+        print('출근 전 요약을 보냈습니다.')
+    except Exception as exc:
+        print(f'요약 보내기 오류: {exc.__class__.__name__}: {exc}', file=sys.stderr)
+
+
+def _send_summary(service, state, settings, *, hours=None):
+    from datetime import datetime, timezone
+
+    from reda import summary
+    since, period = summary.since_for(state, hours=hours)
+    collected = summary.collect(state, since=since)
+    summary.fill_headers(service, collected)
+    text = summary.render(collected, period=period)
+    summary.deliver(settings, text)
+    state.set_sync(summary.SYNC_KEY, datetime.now(timezone.utc).isoformat(timespec='seconds'))
+    return text
+
+
+def cmd_summary(args):
+    """출근 전 요약. 기본은 화면에만 보여 준다. --send면 메신저로 보내고 '지난 요약' 시점을 옮긴다."""
+    from reda import summary
+    from reda.gmail import client
+    from reda.state import StateDB
+    settings = _settings()
+    service = client.get_gmail_service(settings)
+    with StateDB.open(settings) as state:
+        if args.send:
+            try:
+                text = _send_summary(service, state, settings, hours=args.hours)
+            except Exception as exc:
+                print(f'오류: {exc.__class__.__name__}: {exc}', file=sys.stderr)
+                return 1
+            print(text)
+            print(f'\n→ {settings.summary_profile} 프로필의 {settings.summary_to}로 보냈습니다.')
+            return 0
+        since, period = summary.since_for(state, hours=args.hours)
+        collected = summary.collect(state, since=since)
+        summary.fill_headers(service, collected)
+        print(summary.render(collected, period=period))
+    return 0
+
+
+def cmd_alert(args):
+    """급한 메일 알림 미리 보기. 최근 N시간에 분류한 급한 메일로 알림 글을 만든다.
+    --send면 그 글을 메신저로 보낸다 (시험용, 자동 알림의 기준점은 옮기지 않는다)."""
+    from datetime import datetime, timedelta, timezone
+
+    from reda import summary
+    from reda.gmail import client
+    from reda.state import StateDB
+    settings = _settings()
+    service = client.get_gmail_service(settings)
+    after = (datetime.now(timezone.utc) - timedelta(hours=args.hours)).isoformat(timespec='seconds')
+    with StateDB.open(settings) as state:
+        items, _ = summary.urgent(state, after=after)
+        if not items:
+            print(f'최근 {args.hours}시간에 분류한 급한 메일이 없습니다 (답장필요·확인필요 중 긴급도 높음).')
+            return 0
+        summary.fill_headers(service, summary.Summary(since=after, items=items))
+        text = summary.render_alert(items)
+        print(text)
+        if args.send:
+            try:
+                summary.deliver(settings, text)
+            except Exception as exc:
+                print(f'오류: {exc.__class__.__name__}: {exc}', file=sys.stderr)
+                return 1
+            print(f'\n→ {settings.summary_profile} 프로필의 {settings.summary_to}로 보냈습니다.')
     return 0
 
 
@@ -313,6 +406,16 @@ def build_parser():
     classifier.add_argument('--try', dest='try_', action='store_true',
                             help='지어낸 고객 문의 한 통을 분류해 본다 (분류기 API를 부른다)')
     classifier.set_defaults(func=cmd_classifier)
+
+    summary = sub.add_parser('summary', help='출근 전 요약 보기 (--send면 메신저로 보냄)')
+    summary.add_argument('--hours', type=int, default=None, help='최근 N시간 (기본: 지난 요약 이후, 처음이면 24시간)')
+    summary.add_argument('--send', action='store_true', help='메신저로 보내고 지난 요약 시점을 옮긴다')
+    summary.set_defaults(func=cmd_summary)
+
+    alert = sub.add_parser('alert', help='급한 메일 알림 미리 보기 (--send면 메신저로 보냄, 시험용)')
+    alert.add_argument('--hours', type=int, default=24, help='최근 N시간에 분류한 메일 (기본 24)')
+    alert.add_argument('--send', action='store_true', help='메신저로 보낸다 (자동 알림 기준점은 그대로)')
+    alert.set_defaults(func=cmd_alert)
 
     drafts = sub.add_parser('draft-pending', help='답장필요 메일의 초안을 에이전트에게 맡김 (발송 없음)')
     drafts.add_argument('--dry-run', action='store_true', help='맡길 메일만 보여 준다 (에이전트를 부르지 않음)')
