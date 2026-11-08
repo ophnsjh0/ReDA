@@ -80,11 +80,11 @@ def build_user_prompt(mail, settings, masker=None, identity=None):
 class LLMClassifier:
     """complete(system, user) -> JSON 문자열 을 받는 LLM 분류기. 제공자는 complete가 정한다."""
 
-    def __init__(self, complete, settings, name='llm'):
+    def __init__(self, complete, settings, name='llm', identity=None):
         self._complete = complete
         self._settings = settings
-        # 수신 방식 설명에 쓰는 주소 정보 (이름은 분류기에 보내지 않으므로 주소만)
-        self._identity = Identity.from_settings(settings)
+        # 수신 방식 설명에 쓰는 주소 정보. 이름은 분류기에 보내지 않는다
+        self._identity = identity or Identity.from_settings(settings)
         self.name = name
 
     def classify(self, mail):

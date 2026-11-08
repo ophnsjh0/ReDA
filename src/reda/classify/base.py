@@ -1,5 +1,5 @@
 """분류기 공통 타입. 제공자 모듈(llm, anthropic_llm, jev)은 이 모듈만 가져온다."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 from reda.gmail.client import LABEL_CHECK, LABEL_FYI, LABEL_REPLY
@@ -17,6 +17,14 @@ class Classification:
     confidence: float | None = None
     # 본문 인사말이 부르는 사람 (본문에 적힌 그대로, 없으면 ''). 나인지는 reda.identity가 판정한다
     addressee: str = ''
+    # 이름은 못 뽑지만 "인사말이 특정한 한 사람을 부르는가"의 확률은 주는 분류기(Jev)용
+    greets_specific: float | None = None
+    # 긴급도 점수 0~3 (클수록 급함). 우선순위 계산에 쓴다 (reda.priority). 없으면 긴급도로 대신한다
+    urgency_score: float | None = None
+    # 답장과 따로 보는 할 일 표시: '일정' / '할 일' / ''. 참고 메일에도 붙는다 (9단계 일정 제안)
+    todo: str = ''
+    # 분류기가 준 판단 값(질문별 확률 등). 상태 DB에 JSON으로 남겨 기준값 조정에 쓴다. 본문은 넣지 않는다
+    detail: dict | None = field(default=None, compare=False)
 
 
 class Classifier(Protocol):

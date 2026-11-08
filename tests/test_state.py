@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import stat
 
@@ -148,3 +149,13 @@ def test_v3_migration_is_atomic_and_rerunnable(tmp_path, monkeypatch):
     monkeypatch.undo()
     with StateDB(path) as db:
         assert db.conn.execute('PRAGMA user_version').fetchone()[0] == SCHEMA_VERSION
+
+
+def test_v4_stores_classifier_detail_and_priority(tmp_path):
+    with StateDB(tmp_path / 'state.db') as state:
+        state.record_classification('m1', 't1', '답장필요', source='classifier:jev/jev-1.14.0',
+                                    detail={'asks_reply': 0.91, 'model': 'jev-1.14.0'},
+                                    priority=1.5)
+        row = state.get_message('m1')
+        assert json.loads(row['classifier_detail'])['asks_reply'] == 0.91
+        assert row['priority'] == 1.5

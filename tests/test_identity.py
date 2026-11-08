@@ -167,6 +167,14 @@ def test_greets_me(body, expected):
     assert ident.greets_me(body, me()) is expected
 
 
+def test_greeting_with_other_title_is_not_me():
+    # 내 직함(부장)을 알면 같은 이름 + 다른 직함은 다른 사람이다. 직함을 모르면 받아들인다
+    assert not ident.greets_me('길동 대리님 안녕하세요', me())
+    assert ident.greets_me('길동 대리님 안녕하세요', me(titles=[]))
+    assert ident.greets_me('길동님께, 확인 부탁드립니다', me())
+    assert ident.greets_me('길동부장님 안녕하세요', me())
+
+
 def test_greeting_is_only_the_first_lines():
     body = '\n'.join(['안녕하세요.'] + ['내용'] * 10 + ['길동 부장님 참고 바랍니다.'])
     assert not ident.greets_me(body, me())
@@ -204,9 +212,12 @@ def test_group_request_for_someone_else_is_fyi():
     assert result.category == '참고' and '김철수 과장님' in result.reason
 
 
-def test_group_request_without_clue_is_check():
+def test_group_request_without_clue_is_fyi_unless_i_answer_that_group():
+    # 2026-11-08 사용자 확인: 단서 없는 그룹 요청은 "내가 받은 메일이 아님"
     for match in (ident.NONE, ident.UNKNOWN):
-        assert ident.resolve(REPLY, ident.GROUP_TO, match, never).category == '확인필요'
+        assert ident.resolve(REPLY, ident.GROUP_TO, match, never).category == '참고'
+        assert ident.resolve(REPLY, ident.GROUP_TO, match, never,
+                             owned_group=True).category == '확인필요'
 
 
 def test_hidden_mail_is_never_dropped_to_fyi():
@@ -322,3 +333,37 @@ def test_display_name_falls_back_to_sent_mail_from(monkeypatch, tmp_path):
     identity = ident.load(settings(monkeypatch, tmp_path), service=gmail)
     assert identity.full_names == ('홍길동',)
     assert ('messages.list', 'in:sent') in gmail.calls
+
+
+# ---------------------------------------------------------------- 사용자 정보는 .env → 상태 DB → Gmail (결정 6-5)
+
+def test_without_env_address_gmail_account_is_used_and_remembered(monkeypatch, tmp_path):
+    s = settings(monkeypatch, tmp_path)
+    monkeypatch.setenv('REDA_MY_ADDRESSES', '')
+    s = Settings.from_env()
+    gmail = FakeGmail()                                  # getProfile → me@corp.com
+    with StateDB(tmp_path / 'state.db') as state:
+        identity = ident.load(s, service=gmail, state=state, persist=True)
+        assert identity.personal == {'me@corp.com'}
+        assert state.get_profile('email') == 'me@corp.com'
+        # 다음부터는 Gmail 없이 상태 DB에서 읽는다
+        assert ident.load(s, state=state).personal == {'me@corp.com'}
+
+
+def test_env_values_seed_the_state_db(monkeypatch, tmp_path):
+    s = settings(monkeypatch, tmp_path, REDA_MY_GROUPS=GROUP, REDA_MY_TITLES='부장')
+    with StateDB(tmp_path / 'state.db') as state:
+        ident.load(s, state=state, persist=True)
+        # .env에서 사용자 정보를 지워도 상태 DB 값으로 같은 판정을 한다
+        for key in ('REDA_MY_ADDRESSES', 'REDA_MY_GROUPS', 'REDA_MY_TITLES'):
+            monkeypatch.setenv(key, '')
+        identity = ident.load(Settings.from_env(), state=state)
+        assert identity.personal == {ME} and identity.groups == {GROUP}
+        assert identity.titles == ('부장',)
+
+
+def test_env_overrides_state_db(monkeypatch, tmp_path):
+    with StateDB(tmp_path / 'state.db') as state:
+        state.set_profile('email', 'old@corp.example.com', source='gmail')
+        identity = ident.load(settings(monkeypatch, tmp_path), state=state)
+        assert identity.personal == {ME}

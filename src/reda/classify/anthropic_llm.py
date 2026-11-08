@@ -53,7 +53,7 @@ class AnthropicComplete:
         return next((b.text for b in response.content if b.type == 'text'), '')
 
 
-def make(settings):
+def make(settings, identity=None):
     model = model_for(settings)
     return LLMClassifier(AnthropicComplete(model, settings.classifier_effort), settings,
-                         name=f'anthropic/{model}')
+                         name=f'anthropic/{model}', identity=identity)

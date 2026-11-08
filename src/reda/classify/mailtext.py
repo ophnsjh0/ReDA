@@ -54,3 +54,53 @@ def describe(mail, settings, masker=None, identity=None):
         '(본문이 길어 뒷부분을 생략함)' if truncated else None,
     ]
     return masker.mask('\n'.join(line for line in lines if line is not None))
+
+
+LATEST_CHARS = 6000      # 이번 메일에 새로 쓴 부분
+EARLIER_CHARS = 2000     # 인용된 이전 대화 (맥락용 앞부분)
+_FORWARD_PREFIX = ('fwd:', 'fw:', '전달:')
+
+
+def is_forward(mail):
+    subject = (mail.subject or '').strip().lower()
+    return subject.startswith(_FORWARD_PREFIX) or 'forwarded message' in (mail.body or '').lower()
+
+
+def sender_kind(mail, settings, identity):
+    """보낸 사람 구분 (코드가 아는 사실): 고객사 이름 / 사내 / 외부."""
+    customer = customer_of(mail, settings.customer_domains)
+    if customer:
+        return f'고객사 ({customer})'
+    own = {a.split('@', 1)[1] for a in identity.personal | identity.groups if '@' in a}
+    sender = address_of(mail.original_sender) or mail.sender_address
+    domain = sender.rsplit('@', 1)[-1] if '@' in sender else ''
+    if domain and any(domain == d or domain.endswith('.' + d) for d in own):
+        return '사내 (같은 회사 사람이나 팀 메일)'
+    return '외부'
+
+
+def structured_state(mail, settings, identity, masker=None, *, reader=''):
+    """Jev처럼 state를 JSON으로 받는 분류기용. 이름 붙은 필드로 나누고 모두 마스킹한다.
+
+    빈 필드는 넣지 않는다 (빈 목록도 신호로 읽힐 수 있다).
+    """
+    masker = masker or Masker()
+    latest, earlier = ident.split_quoted(mail.body or '')
+    mail_state = {
+        'sender': mail.sender,
+        'original_sender': mail.original_sender,
+        'sender_kind': sender_kind(mail, settings, identity),
+        'received_as': recipient_note(mail, identity),
+        'subject': mail.subject,
+        'is_forward': is_forward(mail),
+        'latest_message': latest[:LATEST_CHARS] + ('\n(뒷부분 생략)' if len(latest) > LATEST_CHARS else ''),
+        'earlier_messages': earlier[:EARLIER_CHARS] + ('\n(뒷부분 생략)' if len(earlier) > EARLIER_CHARS else ''),
+    }
+    masked = {k: masker.mask(v) if isinstance(v, str) else v
+              for k, v in mail_state.items() if v not in ('', None)}
+    if 'latest_message' not in masked:
+        masked['latest_message'] = '(본문 없음)'
+    state = {'mail': masked}
+    if reader:
+        state['reader'] = reader
+    return state

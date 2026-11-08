@@ -102,11 +102,11 @@ def test_report_is_split_by_recipient_mode(monkeypatch, tmp_path):
     classifier = TableClassifier({'c1': '답장필요', 'g1': '답장필요'})
     report = golden.evaluate(FakeGmail(messages=msgs), s, classifier, path,
                              result_path=tmp_path / 'result.csv')
-    # 그룹으로만 받은 요청은 담당자 단서가 없어 확인필요가 된다
+    # 그룹으로만 받은 요청은 담당자 단서가 없어 참고가 된다
     assert report.by_mode['개인 To'][('답장필요', '답장필요')] == 1
-    assert report.by_mode['그룹 To'][('참고', '확인필요')] == 1
+    assert report.by_mode['그룹 To'][('참고', '참고')] == 1
     text = golden.format_report(report)
-    assert '- 개인 To: 1 / 1 / 0 / 0 / 0' in text and '- 그룹 To: 1 / 0 / 0 / 1 / 0' in text
+    assert '- 개인 To: 1 / 1 / 0 / 0 / 0' in text and '- 그룹 To: 1 / 0 / 0 / 0 / 0' in text
     result = {r['message_id']: r for r in golden.read(tmp_path / 'result.csv')}
     assert result['g1']['수신방식'] == '그룹 To' and result['g1']['대상판정'] == 'none'
 
@@ -130,3 +130,19 @@ def test_evaluate_keeps_results_when_classifier_stops(monkeypatch, tmp_path):
     assert report.total == 1 and 'ClassifierBusy' in report.stopped
     assert [r['message_id'] for r in golden.read(tmp_path / 'result.csv')] == ['c1']
     assert '도중에 멈춤' in golden.format_report(report)
+
+
+def test_evaluate_all_classifies_unanswered_rows(monkeypatch, tmp_path):
+    s = settings(monkeypatch, tmp_path)
+    path = tmp_path / 'golden.csv'
+    golden.write(path, [{'message_id': 'c1', '정답': 'r'}, {'message_id': 'c2', '정답': ''},
+                        {'message_id': 'n1', '정답': ''}])
+    report = golden.evaluate(FakeGmail(messages=mails()), s,
+                             TableClassifier({'c1': '답장필요', 'c2': '확인필요'}), path,
+                             result_path=tmp_path / 'result.csv', include_unanswered=True)
+    assert report.total == 1                                    # 정확도는 정답 있는 행만
+    assert report.predicted[(False, '확인필요')] == 1 and report.predicted[(True, '참고')] == 1
+    rows = {r['message_id']: r for r in golden.read(tmp_path / 'result.csv')}
+    assert set(rows) == {'c1', 'c2', 'n1'} and rows['c2']['정답'] == ''
+    assert float(rows['c1']['우선순위']) > 0 and rows['n1']['우선순위'] == '0.0'
+    assert '분류한 메일 전체' in golden.format_report(report)

@@ -44,6 +44,7 @@ def cmd_poll(args):
     """새 메일을 분류하고 라벨을 붙인다. --dry-run이면 아무것도 바꾸지 않고 규칙 필터 결과만 출력한다."""
     if args.dry_run:
         return _poll_dry_run(args)
+    from reda import identity as ident
     from reda import poll
     from reda.classify import ClassifierUnavailable, make_classifier
     from reda.gmail import client
@@ -54,8 +55,10 @@ def cmd_poll(args):
         with exclusive(settings.data_dir / 'poll.lock'):
             service = client.get_gmail_service(settings)
             with StateDB.open(settings) as state:
-                result = poll.run(service, state, settings, make_classifier(settings),
-                                  resync_query=args.query, max_results=args.max)
+                identity = ident.load(settings, service=service, state=state, persist=True)
+                result = poll.run(service, state, settings, make_classifier(settings, identity),
+                                  resync_query=args.query, max_results=args.max,
+                                  identity=identity)
     except AlreadyRunning:
         print('이전 실행이 아직 끝나지 않아 이번 실행은 건너뜁니다.')
         return 0
@@ -130,7 +133,9 @@ def cmd_classifier(args):
     if settings.classifier == 'anthropic':
         print(f'effort: {settings.classifier_effort or "(보내지 않음)"}')
     if settings.classifier == 'jev':
-        print(f'확인필요 기준 확률: {settings.jev_min_probability}')
+        yes = settings.jev_min_probability
+        print(f'판단 기준: {yes:.2f} 이상이면 예, {1 - yes:.2f} 이하면 아니오, 그 사이는 확인필요'
+              ' (질문·판정표: classify/jev_questions.py)')
     if not args.try_:
         return 0
     mine = settings.my_addresses[0] if settings.my_addresses else 'me@corp.example.com'
@@ -160,17 +165,27 @@ def cmd_profile(args):
     service = client.get_gmail_service(settings)
     with StateDB.open(settings) as state:
         identity = ident.load(settings, service=service, state=state)
-        stored = state.get_profile('display_name')
-    print(f'개인 주소: {", ".join(sorted(identity.personal)) or "(없음)"}')
-    print(f'그룹 주소(설정): {", ".join(sorted(identity.groups)) or "(없음)"}'
+        rows = {r['key']: r for r in state.profile_rows()}
+
+    def source(env_value, key, fallback):
+        if env_value:
+            return '설정(.env, 개발용 덮어쓰기)'
+        if key in rows and rows[key]['value']:
+            return f'상태 DB (처음 출처: {rows[key]["source"]})'
+        return fallback
+
+    print(f'개인 주소: {", ".join(sorted(identity.personal)) or "(없음)"}'
+          f'  ← {source(settings.my_addresses, "email", "Gmail 계정 주소")}')
+    print(f'그룹 주소: {", ".join(sorted(identity.groups)) or "(없음)"}'
+          f'  ← {source(settings.my_groups, "groups", "없음")}'
           ' (List-Id·그룹이 바꾼 From으로 알아내는 그룹은 메일마다 더한다)')
-    source = '설정 REDA_MY_NAME' if settings.my_name else (
-        '상태 DB' if stored else 'Gmail 보내는 이름 또는 최근 보낸 메일')
-    print(f'표시 이름 출처: {source}')
+    print(f'표시 이름 출처: '
+          f'{source(settings.my_name, "display_name", "Gmail 보내는 이름 또는 최근 보낸 메일")}')
     print(f'전체 이름: {", ".join(identity.full_names) or "(없음)"}')
     print(f'이름: {", ".join(identity.given_names) or "(없음)"}')
     print(f'성: {", ".join(identity.surnames) or "(없음)"}')
-    print(f'직함: {", ".join(identity.titles) or "(없음: REDA_MY_TITLES로 넣으면 \"성 + 직함\" 호칭도 알아본다)"}')
+    print(f'직함: {", ".join(identity.titles) or "(없음: REDA_MY_TITLES로 넣으면 \"성 + 직함\" 호칭도 알아본다)"}'
+          + (f'  ← {source(settings.my_titles, "titles", "")}' if identity.titles else ''))
     if not identity.has_names:
         print('이름이 없어 인사말로 담당자를 가리지 못한다. 그룹으로 받은 답장필요는 확인필요가 된다.')
     return 0
@@ -178,12 +193,16 @@ def cmd_profile(args):
 
 def cmd_golden_export(args):
     from reda import golden
+    from reda import identity as ident
     from reda.gmail import client
+    from reda.state import StateDB
     args.file = args.file or golden.DEFAULT_PATH
     settings = _settings()
     service = client.get_gmail_service(settings)
+    with StateDB.open(settings) as state:          # 읽기만 한다
+        identity = ident.load(settings, service=service, state=state)
     total, added = golden.export(service, settings, args.file, query=args.query,
-                                 max_results=args.max)
+                                 max_results=args.max, identity=identity)
     print(f'{args.file}: 전체 {total}통 (이번에 더한 메일 {added}통)')
     print('`정답` 칸에 답장필요 또는 참고를 적는다 (r/f로 줄여 써도 된다). 비워 둔 행은 평가하지 않는다.')
     return 0
@@ -191,15 +210,24 @@ def cmd_golden_export(args):
 
 def cmd_golden_eval(args):
     from reda import golden
+    from reda import identity as ident
     from reda.classify import ClassifierUnavailable, make_classifier
     from reda.gmail import client
+    from reda.state import StateDB
     args.file = args.file or golden.DEFAULT_PATH
+    if not args.file.exists():
+        print(f'오류: 골든 세트 파일이 없음: {args.file}. 먼저 `uv run reda golden export`로 만든다',
+              file=sys.stderr)
+        return 1
     settings = _settings()
     service = client.get_gmail_service(settings)
     result_path = args.file.with_name(args.file.stem + '_result.csv')
+    with StateDB.open(settings) as state:          # 읽기만 한다
+        identity = ident.load(settings, service=service, state=state)
     try:
-        report = golden.evaluate(service, settings, make_classifier(settings), args.file,
-                                 result_path=result_path)
+        report = golden.evaluate(service, settings, make_classifier(settings, identity),
+                                 args.file, result_path=result_path, identity=identity,
+                                 include_unanswered=args.all)
     except ClassifierUnavailable as exc:
         print(f'오류: {exc}', file=sys.stderr)
         return 1
@@ -239,6 +267,8 @@ def build_parser():
     export.add_argument('--max', type=int, default=150, help='최대 메일 수')
     export.set_defaults(func=cmd_golden_export)
     evaluate = golden_sub.add_parser('eval', help='정답이 있는 메일을 분류해 보기 (분류기 API를 부른다)')
+    evaluate.add_argument('--all', action='store_true',
+                          help='정답이 없는 메일도 분류해 결과 파일에 남긴다 (정답 달기 전 미리 보기)')
     evaluate.set_defaults(func=cmd_golden_eval)
     for p in (export, evaluate):
         p.add_argument('--file', type=Path, default=None,

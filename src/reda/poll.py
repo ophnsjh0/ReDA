@@ -24,6 +24,8 @@ from googleapiclient.errors import HttpError
 
 from reda import identity as ident
 from reda import rules
+from reda.classify.mailtext import customer_of
+from reda.priority import priority
 from reda.classify import Classification, ClassifierRequestRejected, ClassifierUnavailable
 from reda.gmail import client, history
 from reda.gmail.client import CLASSIFICATION_LABELS
@@ -72,6 +74,7 @@ class Outcome:
     source: str                  # 'rule' 또는 'classifier:<제공자/모델>' (모델별 정확도 비교용)
     recipient_mode: str
     addressee_match: str = ''    # 분류기로 간 메일만: me / other / none / unknown
+    priority: float = 0.0        # 처음 계산한 우선순위 (reda.priority). 요약 때 기다린 시간을 더해 다시 계산
 
 
 def classify(mail, settings, classifier, identity=None, *, replied_in_thread=None):
@@ -87,9 +90,14 @@ def classify(mail, settings, classifier, identity=None, *, replied_in_thread=Non
     name = getattr(classifier, 'name', '')
     raw = classifier.classify(mail)
     match = ident.addressee_match(raw, mail, identity)
+    owned = any(a in identity.owned_groups for a in (*mail.to, *mail.cc))
     decided = ident.resolve(raw, mode, match,
-                            lambda: bool(replied_in_thread and replied_in_thread(mail)))
-    return Outcome(decided, f'classifier:{name}' if name else 'classifier', mode, match)
+                            lambda: bool(replied_in_thread and replied_in_thread(mail)),
+                            owned_group=owned)
+    decided = ident.resolve_todo(decided, mode, match)
+    customer = bool(customer_of(mail, settings.customer_domains))
+    return Outcome(decided, f'classifier:{name}' if name else 'classifier', mode, match,
+                   priority(decided, customer=customer))
 
 
 def _is_not_found(exc):
@@ -111,7 +119,9 @@ def _fetch(service, state, refs, result):
 
 
 def run(service, state, settings, classifier, *, resync_query='in:inbox newer_than:2d',
-        max_results=50):
+        max_results=50, identity=None):
+    """identity: 내 주소·그룹·이름 (reda.identity.load). 주지 않으면 여기서 불러온다.
+    분류기에 준 것과 같은 것을 넘겨야 규칙 필터·분류기·담당자 판정이 같은 주소를 쓴다."""
     result = PollResult()
     changes = history.fetch_changes(service, state.history_id, resync_query=resync_query,
                                     max_results=max_results)
@@ -127,7 +137,7 @@ def run(service, state, settings, classifier, *, resync_query='in:inbox newer_th
         refs.setdefault(row['message_id'], {'id': row['message_id'], 'threadId': row['thread_id']})
     todo = [ref for ref in refs.values() if not state.is_processed(ref['id'])]
 
-    identity = ident.load(settings, service=service, state=state, persist=True)
+    identity = identity or ident.load(settings, service=service, state=state, persist=True)
     replied = lambda m: client.thread_has_my_reply(service, m.thread_id, m.internal_date)  # noqa: E731
     labeler = Labeler(service)
     rejected = []                 # (mail, 오류) 분류기가 거부한 메일. 판단은 반복이 끝난 뒤에
@@ -147,7 +157,9 @@ def run(service, state, settings, classifier, *, resync_query='in:inbox newer_th
                                         urgency=decision.urgency, reason=decision.reason,
                                         source=source, recipient_mode=outcome.recipient_mode,
                                         addressee=decision.addressee or None,
-                                        addressee_match=outcome.addressee_match or None)
+                                        addressee_match=outcome.addressee_match or None,
+                                        detail=decision.detail,
+                                        priority=outcome.priority)
         except ClassifierUnavailable:
             raise
         except ClassifierRequestRejected as exc:

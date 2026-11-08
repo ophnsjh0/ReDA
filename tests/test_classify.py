@@ -226,20 +226,26 @@ class FakePost:
         return self.responses.pop(0)
 
 
-def jev_answer(choice, p, urgency='보통'):
-    other = '참고' if choice == '답장필요' else '답장필요'
-    return 200, {'model': 'jev-1.13.0', 'answers': {
-        'category': {'type': 'choice', 'choice': choice, 'confidence': 0.5,
-                     'probabilities': {choice: p, other: round(1 - p, 4)}},
-        'urgency': {'type': 'choice', 'choice': urgency, 'confidence': 0.4,
-                    'probabilities': {'높음': 0.1, '보통': 0.8, '낮음': 0.1}}},
+def jev_answer(asks=0.9, share=0.05, auto=0.05, closing=0.05, specific=0.1, task=0.1,
+               schedule=0.1, broadcast=0.05, urgency_p=(0.1, 0.6, 0.2, 0.1), model='jev-1.14.0'):
+    """Jev v2 응답 (noul 다섯 개 + urgency score)."""
+    noul = lambda v: {'type': 'noul', 'noul': v}  # noqa: E731
+    score = sum(i * p for i, p in enumerate(urgency_p))
+    return 200, {'model': model, 'answers': {
+        'asks_reply': noul(asks), 'is_share_forward': noul(share), 'is_automated': noul(auto),
+        'is_broadcast': noul(broadcast),
+        'is_closing': noul(closing), 'greets_specific_person': noul(specific),
+        'assigns_task': noul(task), 'has_schedule': noul(schedule),
+        'urgency': {'type': 'score', 'score': score, 'confidence': 0.5,
+                    'legend': {}, 'probabilities': {str(i): p for i, p in enumerate(urgency_p)}}},
         'usage': {'input_tokens': 300, 'output_tokens': 10}}
 
 
 @pytest.fixture
 def jev_settings(monkeypatch, tmp_path):
     return _settings_with(monkeypatch, tmp_path, REDA_CLASSIFIER='jev',
-                          REDA_MY_ADDRESSES='me@corp.example.com')
+                          REDA_MY_ADDRESSES='me@corp.example.com',
+                          REDA_CUSTOMER_DOMAINS='customer-a.example.com=고객사A')
 
 
 def make_jev(settings, *responses):
@@ -248,8 +254,9 @@ def make_jev(settings, *responses):
 
 
 def test_jev_request_shape_and_masking(jev_settings):
-    c, post = make_jev(jev_settings, jev_answer('답장필요', 0.93, '높음'))
-    body = '장비 192.0.2.10 계정: admin01 / 비밀번호: P@ssw0rd! 연락처 010-9876-5432'
+    c, post = make_jev(jev_settings, jev_answer(asks=0.93, urgency_p=(0, 0.1, 0.2, 0.7)))
+    body = ('장비 192.0.2.10 계정: admin01 / 비밀번호: P@ssw0rd! 연락처 010-9876-5432\n'
+            '\n2026년 11월 6일 (금) 오후 3:51, 이차장 <lee@customer-a.example.com>님이 작성:\n> 이전 문의')
     result = c.classify(customer_mail(body))
 
     assert (result.category, result.urgency) == ('답장필요', '높음')
@@ -257,37 +264,136 @@ def test_jev_request_shape_and_masking(jev_settings):
     url, payload, headers = post.calls[0]
     assert url == 'https://api.typesafe.ai/v1/systemone'
     assert headers['Authorization'] == 'Bearer test-key'
-    assert payload['model'] == 'jev-latest'
-    assert set(payload['questions']['category']['criteria']) == {'답장필요', '참고'}
-    assert payload['questions']['category']['type'] == 'choice'
-    assert set(payload['questions']['urgency']['criteria']) == {'높음', '보통', '낮음'}
+    assert payload['model'] == 'jev-1.14.0'               # 버전 고정 (결정 2-9)
+    q = payload['questions']
+    assert {k: v['type'] for k, v in q.items()} == {
+        'asks_reply': 'noul', 'is_share_forward': 'noul', 'is_broadcast': 'noul',
+        'is_automated': 'noul',
+        'is_closing': 'noul', 'greets_specific_person': 'noul', 'assigns_task': 'noul',
+        'has_schedule': 'noul', 'urgency': 'score'}
+    state = payload['state']
+    assert state['mail']['sender_kind'] == '고객사 (고객사A)'
+    assert state['mail']['received_as'].startswith('받는사람(To)에 이 엔지니어 개인 주소')
+    assert '이전 문의' not in state['mail']['latest_message']        # 인용은 따로
+    assert '이전 문의' in state['mail']['earlier_messages']
+    assert 'reader' in state
     sent = json.dumps(payload, ensure_ascii=False)
     for secret in SECRETS:
         assert secret not in sent
-    assert '[IP_1]' in payload['state']
+    assert '[IP_1]' in state['mail']['latest_message']
+    assert result.detail['model'] == 'jev-1.14.0' and result.detail['asks_reply'] == 0.93
 
 
-def test_jev_low_probability_becomes_check_needed(jev_settings):
-    c, _ = make_jev(jev_settings, jev_answer('참고', 0.55))
-    result = c.classify(customer_mail('확인 부탁드립니다'))
-    assert result.category == '확인필요'
-    assert '기준 0.70 미만' in result.reason
+def test_jev_sends_no_user_name(jev_settings):
+    from reda import identity as ident
+    identity = ident.build(personal=['me@corp.example.com'], display_names=['홍길동'])
+    c = jev.JevClassifier(jev_settings, api_key='k', post=FakePost(jev_answer()), identity=identity)
+    assert '홍길동' not in json.dumps(c.payload(customer_mail('확인 부탁드립니다')), ensure_ascii=False)
+
+
+@pytest.mark.parametrize('answers, group_or_cc, expected', [
+    (dict(asks=0.2), False, '참고'),                       # 요청 없음
+    (dict(asks=0.5), False, '확인필요'),                   # 판단이 안 섬
+    (dict(asks=0.9, closing=0.9), False, '참고'),          # 마무리 인사
+    (dict(asks=0.9, share=0.9), True, '참고'),             # 팀에 공유된 메일 (v2.2)
+    (dict(asks=0.5, share=0.9), True, '참고'),             # 회신 여부가 애매해도 팀 공유면 참고
+    (dict(asks=0.5, broadcast=0.9), False, '참고'),        # 여러 사람에게 보낸 설문·피드백 요청
+    (dict(asks=0.9, broadcast=0.9), False, '답장필요'),    # 회신을 분명히 요청한 공지는 내리지 않는다
+    (dict(asks=0.9, share=0.9), False, '답장필요'),        # 나에게 직접 전달한 요청
+    (dict(asks=0.9, auto=0.9), False, '확인필요'),         # 자동 통지 안의 요청
+    (dict(asks=0.9), True, '답장필요'),                    # 그룹 메일은 이 뒤 담당자 판정이 한다
+])
+def test_jev_truth_table(jev_settings, answers, group_or_cc, expected):
+    c, _ = make_jev(jev_settings)
+    result = c.interpret(jev_answer(**answers)[1], group_or_cc=group_or_cc)
+    assert result.category == expected
+
+
+@pytest.mark.parametrize('urgency_p, subject, expected', [
+    ((0.0, 0.1, 0.2, 0.7), '', '높음'),
+    ((0.1, 0.3, 0.3, 0.3), '[긴급] 장애', '높음'),
+    ((0.7, 0.2, 0.1, 0.0), '', '낮음'),
+    ((0.2, 0.3, 0.4, 0.1), '', '보통'),        # 평균이 아니라 수준별 확률로 정한다
+])
+def test_jev_urgency_from_level_probabilities(jev_settings, urgency_p, subject, expected):
+    c, _ = make_jev(jev_settings)
+    assert c.interpret(jev_answer(urgency_p=urgency_p)[1], subject=subject).urgency == expected
 
 
 def test_jev_threshold_is_configurable(monkeypatch, tmp_path):
-    s = _settings_with(monkeypatch, tmp_path, REDA_CLASSIFIER='jev', REDA_JEV_MIN_PROBABILITY='0.5')
-    c, _ = make_jev(s, jev_answer('참고', 0.55))
-    assert c.classify(customer_mail('공유드립니다')).category == '참고'
+    s = _settings_with(monkeypatch, tmp_path, REDA_CLASSIFIER='jev', REDA_JEV_MIN_PROBABILITY='0.6')
+    c, _ = make_jev(s)
+    assert c.interpret(jev_answer(asks=0.65)[1]).category == '답장필요'
+    assert c.interpret(jev_answer(asks=0.45)[1]).category == '확인필요'    # 아니오 기준 0.4
+    assert c.interpret(jev_answer(asks=0.38)[1]).category == '참고'
 
 
-@pytest.mark.parametrize('body', [{}, {'answers': {'category': {'choice': '전달'}}}])
+@pytest.mark.parametrize('body', [{}, {'answers': {'asks_reply': {'noul': 'x'}}},
+                                  {'answers': {'asks_reply': {'type': 'noul', 'noul': 0.9}}}])
 def test_jev_malformed_answer_becomes_check_needed(jev_settings, body):
     c, _ = make_jev(jev_settings, (200, body))
     assert c.classify(customer_mail('x')).category == '확인필요'
 
 
+@pytest.mark.parametrize('task, schedule, expected', [
+    (0.9, 0.9, '일정'), (0.9, 0.1, '할 일'), (0.2, 0.9, ''),
+    (0.5, 0.9, '일정'),       # 날짜가 정해진 일정 통보는 할 일이 애매해도 일정 (v2.2)
+    (0.5, 0.1, '')])
+def test_jev_todo_is_separate_from_reply(jev_settings, task, schedule, expected):
+    c, _ = make_jev(jev_settings)
+    # 답장은 필요 없지만(요청 없음 → 참고) 할 일이 있을 수 있다
+    result = c.interpret(jev_answer(asks=0.1, task=task, schedule=schedule)[1])
+    assert (result.category, result.todo) == ('참고', expected)
+    assert result.detail['todo'] == expected
+
+
+def test_jev_greeting_me_overrides_share_and_broadcast(jev_settings):
+    c, _ = make_jev(jev_settings)
+    shared = jev_answer(asks=0.9, share=0.9)[1]
+    assert c.interpret(shared, group_or_cc=True, greets_me=True).category == '답장필요'
+    notice = jev_answer(asks=0.9, broadcast=0.9)[1]
+    assert c.interpret(notice, greets_me=True).category == '답장필요'
+
+
+def test_jev_automated_mail_has_no_todo(jev_settings):
+    c, _ = make_jev(jev_settings)
+    assert c.interpret(jev_answer(asks=0.1, auto=0.95, task=0.9, schedule=0.99)[1]).todo == ''
+
+
+def test_jev_classify_finds_my_greeting(jev_settings):
+    from reda import identity as ident
+    identity = ident.build(personal=['me@corp.example.com'], groups=['team@corp.example.com'],
+                           display_names=['홍길동'], titles=['부장'])
+    post = FakePost(jev_answer(asks=0.9, share=0.9))
+    c = jev.JevClassifier(jev_settings, api_key='k', post=post, identity=identity)
+    m = Mail.from_gmail(make_message('m1', From='kim@corp.example.com', To='team@corp.example.com',
+                                     Subject='Fwd: 문의', body='길동 부장님, 이 건 확인 부탁드립니다.'))
+    assert c.classify(m).category == '답장필요'
+    assert '홍길동' not in json.dumps(post.calls[0][1], ensure_ascii=False)
+
+
+def test_todo_for_someone_else_in_team_mail_is_dropped():
+    from reda import identity as ident
+    from reda.classify import Classification
+    c = Classification('참고', '낮음', 'x', todo='일정')
+    assert ident.resolve_todo(c, ident.GROUP_TO, ident.OTHER).todo == ''
+    assert ident.resolve_todo(c, ident.GROUP_TO, ident.NONE).todo == '일정'
+    assert ident.resolve_todo(c, ident.PERSONAL_TO, ident.OTHER).todo == '일정'
+
+
+def test_jev_specific_greeting_feeds_owner_check():
+    from reda import identity as ident
+    from reda.classify import Classification
+    identity = ident.build(personal=['me@corp.example.com'], display_names=['홍길동'])
+    m = customer_mail('김철수 과장님, 확인 부탁드립니다.')
+    c = Classification('답장필요', '보통', 'x', greets_specific=0.9)
+    assert ident.addressee_match(c, m, identity) == ident.OTHER
+    c2 = Classification('답장필요', '보통', 'x', greets_specific=0.1)
+    assert ident.addressee_match(c2, m, identity) == ident.NONE
+
+
 def test_jev_retries_rate_limit_then_succeeds(jev_settings):
-    c, post = make_jev(jev_settings, (429, {}), (529, {}), jev_answer('참고', 0.9))
+    c, post = make_jev(jev_settings, (429, {}), (529, {}), jev_answer(asks=0.1))
     assert c.classify(customer_mail('x')).category == '참고'
     assert len(post.calls) == 3
 
@@ -372,3 +478,14 @@ def test_recipient_note_tells_group_from_personal(monkeypatch, tmp_path):
                                      To='tac-team@corp.example.com', Subject='문의', body='x'))
     LLMClassifier(llm, s).classify(m)
     assert '개인 주소 없이 소속 그룹 주소로 받음' in llm.calls[0][1]
+
+
+def test_classifier_uses_given_identity_for_recipient_note(settings):
+    from reda import identity as ident
+    from reda.classify import make_classifier
+    identity = ident.build(personal=['other@corp.example.com'])
+    llm = Recorder(json.dumps({'category': '참고', 'urgency': '낮음', 'reason': 'x', 'addressee': ''}))
+    LLMClassifier(llm, settings, identity=identity).classify(Mail.from_gmail(make_message(
+        'm1', From='lee@customer-a.example.com', To='other@corp.example.com', body='x')))
+    assert '받는사람(To)에 이 엔지니어 개인 주소가 있음' in llm.calls[0][1]
+    assert make_classifier.__code__.co_varnames[:2] == ('settings', 'identity')

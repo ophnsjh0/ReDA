@@ -6,11 +6,13 @@
 """
 import base64
 import re
+import time
 from email.message import EmailMessage
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 # 읽기 + 라벨 붙이기 + 초안 생성. (캘린더 범위는 일정 등록 기능을 붙일 때 추가한다.)
 SCOPES = ['https://www.googleapis.com/auth/gmail.modify']
@@ -85,23 +87,49 @@ def list_new_messages(service, query='in:inbox newer_than:2d', max_results=50):
     return response.get('messages', [])
 
 
+RATE_LIMIT_REASONS = ('rateLimitExceeded', 'userRateLimitExceeded')
+RATE_LIMIT_WAITS = (2, 4, 8, 16, 32)      # 초. Gmail 사용량 제한은 분 단위라 1분 남짓 기다린다
+
+
+def _is_rate_limited(exc):
+    status = getattr(getattr(exc, 'resp', None), 'status', None)
+    if status == 429:
+        return True
+    if status == 403:
+        text = str(getattr(exc, 'content', b'') or b'')
+        return any(reason in text for reason in RATE_LIMIT_REASONS)
+    return False
+
+
+def execute(request, *, sleep=time.sleep, waits=RATE_LIMIT_WAITS):
+    """Gmail 요청 실행. 사용량 제한(429, 403 rateLimitExceeded)이면 기다렸다가 다시 한다.
+    다른 오류와 마지막 시도의 오류는 그대로 낸다."""
+    for wait in (*waits, None):
+        try:
+            return request.execute()
+        except HttpError as exc:
+            if wait is None or not _is_rate_limited(exc):
+                raise
+            sleep(wait)
+
+
 def get_message(service, message_id):
-    return service.users().messages().get(userId='me', id=message_id, format='full').execute()
+    return execute(service.users().messages().get(userId='me', id=message_id, format='full'))
 
 
 def get_message_metadata(service, message_id, headers=('From', 'To', 'Cc', 'Subject', 'Date')):
     """본문 없이 헤더만 가져온다. 목록 출력과 규칙 필터용."""
-    return service.users().messages().get(
-        userId='me', id=message_id, format='metadata', metadataHeaders=list(headers)).execute()
+    return execute(service.users().messages().get(
+        userId='me', id=message_id, format='metadata', metadataHeaders=list(headers)))
 
 
 def get_thread(service, thread_id):
-    return service.users().threads().get(userId='me', id=thread_id, format='full').execute()
+    return execute(service.users().threads().get(userId='me', id=thread_id, format='full'))
 
 
 def thread_has_my_reply(service, thread_id, before_ms):
     """이 스레드에 before_ms(밀리초) 전에 내가 보낸 메일이 있는가."""
-    thread = service.users().threads().get(userId='me', id=thread_id, format='minimal').execute()
+    thread = execute(service.users().threads().get(userId='me', id=thread_id, format='minimal'))
     return any('SENT' in m.get('labelIds', []) and int(m.get('internalDate') or 0) < before_ms
                for m in thread.get('messages', []))
 

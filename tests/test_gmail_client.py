@@ -53,3 +53,48 @@ def test_reply_to_header_wins_and_subject_not_doubled():
 def test_html_to_text_keeps_blocks():
     html = '<div>첫 줄</div><div>둘째 <b>줄</b></div><p>문단</p>'
     assert client.html_to_text(html) == '첫 줄\n둘째 줄\n\n문단'
+
+
+# ---------------------------------------------------------------- 사용량 제한 재시도
+
+import httplib2  # noqa: E402
+import pytest  # noqa: E402
+from googleapiclient.errors import HttpError  # noqa: E402
+
+
+class _Flaky:
+    def __init__(self, errors, result='ok'):
+        self.errors, self.result, self.calls = list(errors), result, 0
+
+    def execute(self):
+        self.calls += 1
+        if self.errors:
+            raise self.errors.pop(0)
+        return self.result
+
+
+def _http_error(status, reason=''):
+    return HttpError(httplib2.Response({'status': status}),
+                     f'{{"error": {{"errors": [{{"reason": "{reason}"}}]}}}}'.encode())
+
+
+def test_rate_limited_request_is_retried():
+    sleeps = []
+    req = _Flaky([_http_error(403, 'rateLimitExceeded'), _http_error(429)])
+    assert client.execute(req, sleep=sleeps.append) == 'ok'
+    assert sleeps == [2, 4] and req.calls == 3
+
+
+def test_other_errors_are_not_retried():
+    req = _Flaky([_http_error(403, 'insufficientPermissions')])
+    with pytest.raises(HttpError):
+        client.execute(req, sleep=lambda s: None)
+    assert req.calls == 1
+
+
+def test_rate_limit_gives_up_after_waits():
+    sleeps = []
+    req = _Flaky([_http_error(429)] * 3)
+    with pytest.raises(HttpError):
+        client.execute(req, sleep=sleeps.append, waits=(1, 1))
+    assert sleeps == [1, 1] and req.calls == 3

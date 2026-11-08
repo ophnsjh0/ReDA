@@ -37,7 +37,7 @@ def test_poll_labels_mail_and_moves_start(monkeypatch, tmp_path, capsys):
         history_pages=[{'history': [added('101', 'm1', 't1', ['INBOX'])], 'historyId': '110'}],
         messages={'m1': make_message('m1', From='noreply@vendor.example.com', Subject='공지')})
     _setup(monkeypatch, tmp_path, gmail)
-    monkeypatch.setattr(classify, 'make_classifier', lambda settings: None)  # 규칙으로 끝난다
+    monkeypatch.setattr(classify, 'make_classifier', lambda settings, identity=None: None)  # 규칙으로 끝난다
     with StateDB(tmp_path / 'state.db') as db:
         db.set_sync('history_id', '100')
 
@@ -62,7 +62,7 @@ def test_classifier_command_shows_provider_and_model(monkeypatch, tmp_path, caps
     monkeypatch.delenv('REDA_CLASSIFIER_MODEL', raising=False)
     assert cli.main(['classifier']) == 0
     out = capsys.readouterr().out
-    assert '분류기: jev' in out and '모델: jev-latest (제공자 기본값)' in out
+    assert '분류기: jev' in out and '모델: jev-1.14.0 (제공자 기본값)' in out
 
 
 def test_classifier_try_classifies_sample_mail(monkeypatch, tmp_path, capsys):
@@ -121,3 +121,9 @@ def test_profile_shows_addresses_and_name(monkeypatch, tmp_path, capsys):
     assert '전체 이름: 홍길동' in out and '이름: 길동' in out and 'Gmail 보내는 이름' in out
     with StateDB(tmp_path / 'state.db') as db:
         assert db.get_profile('display_name') is None      # 보기만 하고 저장하지 않는다
+
+
+def test_golden_eval_without_file_reports_error(monkeypatch, tmp_path, capsys):
+    _setup(monkeypatch, tmp_path, FakeGmail())
+    assert cli.main(['golden', 'eval', '--file', str(tmp_path / 'none.csv')]) == 1
+    assert '골든 세트 파일이 없음' in capsys.readouterr().err

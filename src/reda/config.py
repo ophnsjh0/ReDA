@@ -78,7 +78,7 @@ class Settings:
     classifier: str
     classifier_model: str          # 비우면 제공자 기본 모델
     classifier_effort: str         # anthropic만. 비우면 보내지 않는다
-    jev_min_probability: float     # jev만. 고른 분류의 확률이 이보다 낮으면 확인필요
+    jev_min_probability: float     # jev만. 판단(noul)을 예로 볼 기준. 아니오 기준은 1 - 이 값
     # 내가 속한 그룹(팀 메일) 주소. 그룹 주소로만 받은 요청은 담당자 단서가 있어야 답장필요다 (결정 2-5).
     # 헤더(List-Id, 그룹이 바꾼 From)로 알아낼 수 있는 그룹은 적지 않아도 된다
     my_groups: tuple[str, ...] = ()
@@ -87,6 +87,8 @@ class Settings:
     my_name: str = ''
     my_titles: tuple[str, ...] = ()      # 직함 (예: 부장). '이름 + 직함' 호칭 판정에 쓴다
     my_aliases: tuple[str, ...] = ()     # 그 밖에 불리는 이름 (영문 이름 등)
+    # 내가 직접 답하는 그룹. 이 그룹으로 온 요청은 담당 단서가 없어도 확인필요 (없으면 참고)
+    my_owned_groups: tuple[str, ...] = ()
 
     @classmethod
     def from_env(cls):
@@ -110,4 +112,5 @@ class Settings:
             my_name=_env('REDA_MY_NAME'),
             my_titles=_list('REDA_MY_TITLES'),
             my_aliases=_list('REDA_MY_ALIASES'),
+            my_owned_groups=_addresses('REDA_MY_OWNED_GROUPS'),
         )

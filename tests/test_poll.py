@@ -265,8 +265,16 @@ def test_group_request_without_clue_is_check_unless_i_replied(team_settings, sta
                                     body='안녕하세요. 추가 문의입니다.'),
                        threads={'t-mine': [{'labelIds': ['SENT'], 'internalDate': '5'}]})
     poll.run(gmail, state, team_settings, CountingClassifier())
-    assert state.get_message('g1')['category'] == '확인필요'
+    assert state.get_message('g1')['category'] == '참고'          # 단서 없는 그룹 요청
     assert state.get_message('g2')['category'] == '답장필요'      # 내가 답한 스레드
+
+
+def test_owned_group_request_without_clue_is_check(monkeypatch, team_settings, state):
+    monkeypatch.setenv('REDA_MY_OWNED_GROUPS', GROUP)
+    s = Settings.from_env()
+    poll.run(team_gmail(group_request('g1', '안녕하세요. 확인 부탁드립니다.')), state, s,
+             CountingClassifier())
+    assert state.get_message('g1')['category'] == '확인필요'
 
 
 def test_group_cc_greeting_me_goes_to_classifier(team_settings, state):
@@ -310,3 +318,18 @@ def test_always_rejected_retry_does_not_stall_sync(settings, state):
     result = poll.run(gmail, state, settings, classifier)        # c1만 다시 시도 → 거부
     assert result.failed == 1 and state.history_id == '300'      # 멈추지 않고 진행
     assert [r['attempts'] for r in state.failures()] == [2]
+
+
+def test_poll_works_without_user_info_in_env(monkeypatch, tmp_path, state):
+    """배포 때처럼 .env에 사용자 정보가 없으면 Gmail 계정 주소로 판정한다."""
+    monkeypatch.setenv('REDA_DATA_DIR', str(tmp_path))
+    monkeypatch.setenv('REDA_MY_ADDRESSES', '')
+    s = Settings.from_env()
+    gmail = gmail_with(make_message('c1', From='lee@customer-a.example.com', To='me@corp.com'),
+                       make_message('c2', From='lee@customer-a.example.com',
+                                    To='kim@corp.example.com', Cc='me@corp.com'))
+    classifier = CountingClassifier()
+    poll.run(gmail, state, s, classifier)
+    assert state.get_message('c1')['recipient_mode'] == 'personal_to'
+    assert state.get_message('c2')['reason'] == '참조(Cc)로만 받음'
+    assert classifier.seen == ['c1']

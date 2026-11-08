@@ -9,8 +9,11 @@
 김진 ↔ 김진우, Gildong Hong ↔ Minsu Hong)을 나로 보면 남의 메일이 `답장필요`로 남거나
 참조 규칙을 빠져나간다.
 
-이름 프로필은 설정(개발용)과 Gmail 표시 이름에서 만들고 상태 DB `identity_aliases`에 남긴다.
-쓰면서 배운 별칭도 같은 표에 쌓인다 (`기획안/구현계획.md` "사용자 정보 저장").
+사용자 정보(메일 주소, 그룹, 이름, 직함, 별칭)는 이 순서로 읽는다 (결정 6-5).
+1. 설정(.env) 값이 있으면 그것. 개발용 덮어쓰기다. 읽은 값은 상태 DB에도 남긴다
+2. 없으면 상태 DB(`user_profile`, `identity_aliases`)
+3. 그것도 없으면 Gmail에서 알아내 상태 DB에 남긴다 (메일 주소: getProfile, 표시 이름: sendAs·보낸 메일)
+배포하면 사용자별 .env에는 사용자 정보가 없고, 상태 DB가 기준이 된다.
 """
 import re
 from dataclasses import dataclass, field, replace
@@ -79,6 +82,7 @@ class Identity:
     surnames: tuple = ()                # 성 ('홍', 'hong'). 직함이나 Mr. 같은 호칭과 함께일 때만
     latin_names: tuple = ()             # 영문 이름과 별칭, 단어 튜플 (('gildong', 'hong'), ('gildong',))
     titles: tuple = ()                  # 직함 ('부장')
+    owned_groups: frozenset = frozenset()  # 내가 직접 답하는 그룹 (단서 없는 요청을 확인필요로)
     _cache: dict = field(default_factory=dict, compare=False, repr=False)
 
     @classmethod
@@ -144,7 +148,7 @@ def name_forms(display_name):
     return _dedupe(full), _dedupe(given), _dedupe(surnames), _dedupe(latin)
 
 
-def build(*, personal=(), groups=(), display_names=(), aliases=(), titles=()):
+def build(*, personal=(), groups=(), display_names=(), aliases=(), titles=(), owned_groups=()):
     full, given, surnames, latin = [], [], [], []
     for name in display_names:
         f, g, s, l_ = name_forms(name)
@@ -161,7 +165,8 @@ def build(*, personal=(), groups=(), display_names=(), aliases=(), titles=()):
     return Identity(personal=frozenset(a.lower() for a in personal) - groups, groups=groups,
                     full_names=_dedupe(full), given_names=_dedupe(given),
                     surnames=_dedupe(surnames), latin_names=_dedupe(latin),
-                    titles=_dedupe(_norm(t) for t in titles))
+                    titles=_dedupe(_norm(t) for t in titles),
+                    owned_groups=frozenset(a.lower() for a in owned_groups))
 
 
 # ------------------------------------------------------------ 인사말 대상 대조
@@ -226,6 +231,15 @@ def match_addressee(addressee, identity):
     return OTHER if identity.has_names else UNKNOWN
 
 
+def split_quoted(body):
+    """(이번 메일에 새로 쓴 부분, 인용·전달된 이전 메일). 인용이 시작되는 첫 줄에서 나눈다."""
+    lines = (body or '').splitlines()
+    for i, line in enumerate(lines):
+        if _QUOTE_START.match(line.strip()):
+            return '\n'.join(lines[:i]).strip(), '\n'.join(lines[i:]).strip()
+    return (body or '').strip(), ''
+
+
 def greeting_area(body, lines=GREETING_LINES):
     """본문 맨 앞의 몇 줄. 인용·전달된 이전 메일과 그 아래는 보지 않는다."""
     picked = []
@@ -250,8 +264,9 @@ def _greeting_patterns(identity):
     for f in identity.full_names:
         patterns.append(rf'(?<![가-힣]){re.escape(f)}{after}')
     for g in identity.given_names:
-        # 이름 + (직함) + 님, 또는 이름 + 내 직함. 앞이 한글이면 다른 사람 이름의 일부다
-        tail = rf'(?:\s*(?:{titles}))?\s*님' + (rf'|\s*(?:{mine})' if mine else '')
+        # 이름 + 님, 또는 이름 + 내 직함 (+님). 앞이 한글이면 다른 사람 이름의 일부다.
+        # 내 직함을 모르면 아무 직함이나 받는다. 알면 다른 직함('길동 대리님')은 같은 이름의 다른 사람이다
+        tail = rf'\s*님|\s*(?:{mine})' if mine else rf'(?:\s*(?:{titles}))?\s*님'
         patterns.append(rf'(?<![가-힣]){re.escape(g)}(?:{tail})')
     for words in identity.latin_names:
         patterns.append(r'\b' + r'[\s.\-]*'.join(re.escape(w) for w in words) + r'\b')
@@ -275,18 +290,27 @@ def greets_me(body, identity):
     return any(p.search(text) for p in identity.greeting_patterns for text in texts)
 
 
-def addressee_match(classification, mail, identity):
+def addressee_match(classification, mail, identity, *, yes=0.7):
+    """내 이름은 코드가 본문에서 찾는다. 못 찾으면 분류기가 준 인사말 대상(이름이나 확률)을 본다."""
     if greets_me(mail.body, identity):
         return ME
-    return match_addressee(classification.addressee, identity)
+    if classification.addressee:
+        return match_addressee(classification.addressee, identity)
+    if classification.greets_specific is not None and classification.greets_specific >= yes:
+        # 특정한 사람을 부르는데 내 이름은 없다 → 다른 사람. 이름 프로필이 없으면 모른다
+        return OTHER if identity.has_names else UNKNOWN
+    return NONE
 
 
 # ------------------------------------------------------------ 담당자 판정 (결정 2-5)
 
-def resolve(classification, mode, match, replied_in_thread):
+def resolve(classification, mode, match, replied_in_thread, *, owned_group=False):
     """그룹 주소로 받은 `답장필요`는 담당자 단서가 있을 때만 그대로 둔다.
 
     replied_in_thread: 이 스레드에 내가 답한 적이 있는지 돌려주는 함수 (필요할 때만 부른다).
+    owned_group: 이 메일을 받은 그룹이 내가 직접 답하는 그룹이다 (REDA_MY_OWNED_GROUPS, 결정 6-3).
+    담당자 단서가 없으면 내가 답하는 그룹이면 `확인필요`, 아니면 `참고`다 (2026-11-08 사용자 확인:
+    그룹으로 온 케이스·고객 요청 중 단서 없는 것은 "내가 받은 메일이 아님").
     숨은참조·기타(HIDDEN)는 내 메일일 수 있으므로 `참고`로 내리지 않고, 다른 사람을 부르면
     `확인필요`로만 보낸다.
     """
@@ -309,11 +333,35 @@ def resolve(classification, mode, match, replied_in_thread):
                        reason=f'그룹으로 받은 요청이지만 인사말이 다른 사람을 부름{who}. {c.reason}')
     if replied_in_thread():
         return replace(c, reason=f'그룹으로 받은 요청, 내가 답한 적 있는 스레드. {c.reason}')
-    return replace(c, category=LABEL_CHECK,
+    if owned_group:
+        return replace(c, category=LABEL_CHECK,
+                       reason=f'내가 답하는 그룹으로 받은 요청, 담당자 단서 없음. {c.reason}')
+    return replace(c, category=LABEL_FYI,
                    reason=f'그룹으로 받은 요청, 담당자 단서 없음. {c.reason}')
 
 
+def resolve_todo(classification, mode, match):
+    """할 일 표시도 담당자를 본다. 그룹으로 받은 메일의 인사말이 다른 사람을 부르면 그 사람의 일이다."""
+    c = classification
+    if c.todo and mode in GROUP_MODES and match == OTHER:
+        return replace(c, todo='')
+    return c
+
+
 # ------------------------------------------------------------ 불러오기
+
+def fetch_email_address(service):
+    """연결된 Gmail 계정의 주소. 못 가져오면 ''."""
+    try:
+        profile = service.users().getProfile(userId='me').execute()
+    except HttpError:
+        return ''
+    return (profile.get('emailAddress') or '').strip().lower()
+
+
+def _csv(value):
+    return [v.strip() for v in (value or '').split(',') if v.strip()]
+
 
 def fetch_display_name(service):
     """내 표시 이름. Gmail 기본 보내는 주소(sendAs)의 이름, 비어 있으면 최근 보낸 메일 From의 이름.
@@ -345,6 +393,17 @@ def load(settings, *, service=None, state=None, persist=False, today=None):
     골든 세트 평가처럼 상태를 바꾸지 않을 때는 persist=False.
     """
     today = (today or date.today()).isoformat()
+    stored = state.get_profile if state is not None else (lambda key: None)
+
+    personal, personal_source = list(settings.my_addresses), 'config'
+    if not personal:
+        personal, personal_source = _csv(stored('email')), 'state'
+    if not personal and service is not None:
+        email = fetch_email_address(service)
+        personal, personal_source = ([email] if email else []), 'gmail'
+    groups = list(settings.my_groups) or _csv(stored('groups'))
+    owned = list(settings.my_owned_groups) or _csv(stored('owned_groups'))
+
     display = settings.my_name
     source = 'config'
     if not display and state is not None:
@@ -362,6 +421,12 @@ def load(settings, *, service=None, state=None, persist=False, today=None):
     aliases = list(settings.my_aliases)
 
     if state is not None and persist:
+        if personal and personal_source != 'state':
+            state.set_profile('email', ','.join(personal), source=personal_source)
+        if settings.my_groups:
+            state.set_profile('groups', ','.join(settings.my_groups), source='config')
+        if settings.my_owned_groups:
+            state.set_profile('owned_groups', ','.join(settings.my_owned_groups), source='config')
         if display and source != 'state':
             state.set_profile('display_name', display, source=source)
         if settings.my_titles:
@@ -378,5 +443,6 @@ def load(settings, *, service=None, state=None, persist=False, today=None):
         aliases = [a for a in aliases if a not in rejected]
         if display in rejected:
             display = ''
-    return build(personal=settings.my_addresses, groups=settings.my_groups,
-                 display_names=[display] if display else [], aliases=aliases, titles=titles)
+    return build(personal=personal, groups=groups,
+                 display_names=[display] if display else [], aliases=aliases, titles=titles,
+                 owned_groups=owned)

@@ -7,7 +7,7 @@
 | REDA_CLASSIFIER | 구현 | 모델 기본값 | 자격 증명 |
 |---|---|---|---|
 | anthropic (기본) | LLM이 JSON으로 답한다 (`llm.py`, `anthropic_llm.py`) | claude-opus-5-5 | ANTHROPIC_API_KEY |
-| jev | TypeSafe Jev의 choice 질문과 확률 (`jev.py`) | jev-latest | TYPESAFE_API_KEY |
+| jev | TypeSafe Jev. 판단 질문(noul·score)과 코드 판정표 (`jev.py`, `jev_questions.py`) | jev-1.14.0 | TYPESAFE_API_KEY |
 
 새 제공자는 `DEFAULT_MODEL`과 `make(settings) -> Classifier`를 가진 모듈을 만들고 PROVIDERS에
 한 줄 더한다. 공통 타입과 오류는 `base.py`에 있다.
@@ -42,8 +42,9 @@ def model_for(settings):
     return settings.classifier_model or provider_module(settings.classifier).DEFAULT_MODEL
 
 
-def make_classifier(settings):
-    return provider_module(settings.classifier).make(settings)
+def make_classifier(settings, identity=None):
+    """identity: 분류기에 수신 방식을 알려 줄 때 쓰는 내 주소·그룹 (reda.identity.load). 없으면 설정 값."""
+    return provider_module(settings.classifier).make(settings, identity)
 
 
 __all__ = ['CATEGORIES', 'URGENCIES', 'PROVIDERS', 'Classification', 'Classifier',

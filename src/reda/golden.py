@@ -13,6 +13,7 @@
   맞는지 보려는 것이다
 """
 import csv
+import json
 import os
 from collections import Counter
 from dataclasses import dataclass, field
@@ -27,6 +28,8 @@ from reda.mail import Mail
 # 실행 위치와 관계없이 이 저장소의 tests/private/ (git 제외)
 DEFAULT_PATH = Path(__file__).resolve().parents[2] / 'tests' / 'private' / 'golden.csv'
 FIELDS = ('message_id', '날짜', '보낸사람', '제목', '수신방식', '규칙결과', '정답', '메모')
+RESULT_FIELDS = FIELDS + ('예측', '할일', '긴급도', '우선순위', '출처', '인사말대상', '대상판정',
+                          '이유', '판단값')
 ANSWERS = (LABEL_REPLY, LABEL_FYI)
 # 사람이 짧게 적어도 알아듣는다
 _ALIASES = {'r': LABEL_REPLY, '답장': LABEL_REPLY, 'o': LABEL_REPLY,
@@ -115,6 +118,8 @@ class Report:
     errors: list = field(default_factory=list)          # (message_id, 오류)
     by_mode: dict = field(default_factory=dict)         # 수신 방식 → Counter((정답, 예측))
     stopped: str = ''                # 분류기 설정 오류·일시 장애로 도중에 멈췄으면 그 이유
+    predicted: Counter = field(default_factory=Counter)  # 분류한 모든 메일(정답 없는 것 포함)의 예측
+    todos: Counter = field(default_factory=Counter)      # 할 일 표시 ('일정' / '할 일') 수
 
     @property
     def reply_total(self):
@@ -131,10 +136,12 @@ class Report:
 
 
 def evaluate(service, settings, classifier, path=DEFAULT_PATH, *, result_path=None,
-             identity=None):
+             identity=None, include_unanswered=False):
     """정답이 달린 행을 분류해 Report를 돌려준다. result_path에 행마다 예측을 남긴다.
 
     `reda poll`과 같은 판정(규칙 → 분류기 → 담당자 판정)을 쓴다.
+    include_unanswered=True면 정답이 없는 행도 분류해 결과 파일에 남긴다 (정답을 달기 전 미리 보기).
+    정확도 계산에는 정답이 있는 행만 쓴다.
     """
     from reda.poll import classify
     identity = identity or ident.load(settings, service=service)
@@ -142,7 +149,7 @@ def evaluate(service, settings, classifier, path=DEFAULT_PATH, *, result_path=No
     report, results = Report(), []
     for row in read(path):
         truth = normalize_answer(row.get('정답'))
-        if not truth:
+        if not truth and not include_unanswered:
             continue
         try:
             mail = Mail.from_gmail(client.get_message(service, row['message_id']))
@@ -157,25 +164,39 @@ def evaluate(service, settings, classifier, path=DEFAULT_PATH, *, result_path=No
                 break
             report.errors.append((row['message_id'], repr(exc)))
             continue
-        report.total += 1
-        report.by_rule += source == 'rule'
-        report.confusion[(truth, decision.category)] += 1
         mode = ident.MODE_LABELS[outcome.recipient_mode]
-        report.by_mode.setdefault(mode, Counter())[(truth, decision.category)] += 1
-        if truth == LABEL_REPLY and decision.category == LABEL_FYI:
-            report.misses.append({**row, '예측': decision.category, '이유': decision.reason})
-        results.append({**row, '정답': truth, '예측': decision.category,
-                        '긴급도': decision.urgency, '출처': source, '수신방식': mode,
-                        '인사말대상': decision.addressee, '대상판정': outcome.addressee_match,
-                        '이유': decision.reason})
+        report.predicted[(source == 'rule', decision.category)] += 1
+        if truth:
+            report.total += 1
+            report.by_rule += source == 'rule'
+            report.confusion[(truth, decision.category)] += 1
+            report.by_mode.setdefault(mode, Counter())[(truth, decision.category)] += 1
+            if truth == LABEL_REPLY and decision.category == LABEL_FYI:
+                report.misses.append({**row, '예측': decision.category, '이유': decision.reason})
+        if decision.todo:
+            report.todos[decision.todo] += 1
+        results.append({**row, '정답': truth, '예측': decision.category, '할일': decision.todo,
+                        '긴급도': decision.urgency, '우선순위': outcome.priority, '출처': source,
+                        '수신방식': mode, '인사말대상': decision.addressee,
+                        '대상판정': outcome.addressee_match, '이유': decision.reason,
+                        '판단값': json.dumps(decision.detail, ensure_ascii=False)
+                        if decision.detail else ''})
     if result_path:
-        write(result_path, results,
-              FIELDS + ('예측', '긴급도', '출처', '인사말대상', '대상판정', '이유'))
+        write(result_path, results, RESULT_FIELDS)
     return report
 
 
 def format_report(report):
     lines = [f'정답이 달린 메일 {report.total}통 (규칙으로 끝남 {report.by_rule}통)']
+    if report.predicted:
+        def count(by_rule, category):
+            return report.predicted[(by_rule, category)]
+        cats = (LABEL_REPLY, LABEL_FYI, LABEL_CHECK)
+        lines.append('분류한 메일 전체 (정답 없는 메일 포함): '
+                     f'규칙 → 참고 {count(True, LABEL_FYI)}통 / 분류기 → '
+                     + ', '.join(f'{c} {count(False, c)}' for c in cats))
+    if report.todos:
+        lines.append('할 일 표시: ' + ', '.join(f'{k} {n}통' for k, n in report.todos.items()))
     if report.stopped:
         lines.insert(0, f'도중에 멈춤: {report.stopped}. 아래는 멈추기 전까지 평가한 {report.total}통의 결과다')
     if report.total:

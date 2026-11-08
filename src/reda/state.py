@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (
@@ -119,6 +119,13 @@ CREATE TABLE IF NOT EXISTS feedback (
 """
 
 
+# 4: 분류기 판단 값과 우선순위 (결정 2-8). detail은 질문별 확률 같은 JSON이고 본문은 넣지 않는다
+_SCHEMA_V4 = """
+ALTER TABLE messages ADD COLUMN classifier_detail TEXT;
+ALTER TABLE messages ADD COLUMN priority REAL;
+"""
+
+
 def _now():
     return datetime.now(timezone.utc).isoformat(timespec='seconds')
 
@@ -175,21 +182,26 @@ class StateDB:
                 self.conn.executescript(_SCHEMA_V2)
                 self.conn.execute('PRAGMA user_version = 2')
         if version < 3:
-            # 한 트랜잭션으로 묶는다. sqlite3 모듈은 DDL 앞에 BEGIN을 넣지 않으므로 직접 연다.
-            # 도중에 실패하면 되돌리고, 이미 있는 열은 건너뛰어 다시 실행해도 된다
-            self.conn.execute('BEGIN IMMEDIATE')
-            try:
-                columns = {r['name'] for r in self.conn.execute('PRAGMA table_info(messages)')}
-                for statement in _statements(_SCHEMA_V3):
-                    added = re.match(r'ALTER TABLE messages ADD COLUMN (\w+)', statement)
-                    if added and added.group(1) in columns:
-                        continue
-                    self.conn.execute(statement)
-                self.conn.execute('PRAGMA user_version = 3')
-                self.conn.execute('COMMIT')
-            except BaseException:
-                self.conn.execute('ROLLBACK')
-                raise
+            self._migrate_atomic(3, _SCHEMA_V3)
+        if version < 4:
+            self._migrate_atomic(4, _SCHEMA_V4)
+
+    def _migrate_atomic(self, version, script):
+        """한 트랜잭션으로 묶는다. sqlite3 모듈은 DDL 앞에 BEGIN을 넣지 않으므로 직접 연다.
+        도중에 실패하면 되돌리고, 이미 있는 열은 건너뛰어 다시 실행해도 된다."""
+        self.conn.execute('BEGIN IMMEDIATE')
+        try:
+            columns = {r['name'] for r in self.conn.execute('PRAGMA table_info(messages)')}
+            for statement in _statements(script):
+                added = re.match(r'ALTER TABLE messages ADD COLUMN (\w+)', statement)
+                if added and added.group(1) in columns:
+                    continue
+                self.conn.execute(statement)
+            self.conn.execute(f'PRAGMA user_version = {int(version)}')
+            self.conn.execute('COMMIT')
+        except BaseException:
+            self.conn.execute('ROLLBACK')
+            raise
 
     # ------------------------------------------------------------ sync
     def get_sync(self, key, default=None):
@@ -209,19 +221,22 @@ class StateDB:
     # ------------------------------------------------------------ messages
     def record_classification(self, message_id, thread_id, category, *, urgency=None,
                               reason=None, source='classifier', recipient_mode=None,
-                              addressee=None, addressee_match=None):
+                              addressee=None, addressee_match=None, detail=None,
+                              priority=None):
+        detail_json = json.dumps(detail, ensure_ascii=False) if detail else None
         with self.conn:
             self.conn.execute(
                 'INSERT INTO messages(message_id, thread_id, category, urgency, reason, source,'
-                ' labeled_at, recipient_mode, addressee, addressee_match)'
-                ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) '
+                ' labeled_at, recipient_mode, addressee, addressee_match, classifier_detail,'
+                ' priority) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) '
                 'ON CONFLICT(message_id) DO UPDATE SET category = excluded.category,'
                 ' urgency = excluded.urgency, reason = excluded.reason,'
                 ' source = excluded.source, labeled_at = excluded.labeled_at,'
                 ' recipient_mode = excluded.recipient_mode, addressee = excluded.addressee,'
-                ' addressee_match = excluded.addressee_match',
+                ' addressee_match = excluded.addressee_match,'
+                ' classifier_detail = excluded.classifier_detail, priority = excluded.priority',
                 (message_id, thread_id, category, urgency, reason, source, _now(),
-                 recipient_mode, addressee, addressee_match))
+                 recipient_mode, addressee, addressee_match, detail_json, priority))
 
     def get_message(self, message_id):
         return self.conn.execute(
@@ -247,6 +262,9 @@ class StateDB:
                 'INSERT INTO user_profile(key, value, source, updated_at) VALUES (?, ?, ?, ?) '
                 'ON CONFLICT(key) DO UPDATE SET value = excluded.value, source = excluded.source,'
                 ' updated_at = excluded.updated_at', (key, str(value), source, _now()))
+
+    def profile_rows(self):
+        return self.conn.execute('SELECT * FROM user_profile ORDER BY key').fetchall()
 
     def upsert_alias(self, alias, kind, source, status='confirmed'):
         """없으면 더한다. 이미 있으면 상태를 바꾸지 않는다 (사용자가 거절한 별칭을 되살리지 않는다)."""
