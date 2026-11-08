@@ -153,6 +153,17 @@ def test_second_draft_for_same_thread_is_refused(settings, state):
     assert len(gmail.drafts) == 1
 
 
+def test_notes_are_added_without_links(settings, state):
+    gmail = gmail_with_thread()
+    tools = tools_for(gmail, settings, state)
+    tools.get_thread('t1')
+    tools.save_draft('t1', '버전은 [확인 필요]입니다.',
+                     evidence=[{'note': '소프트웨어 버전은 이전 메일에서 찾지 못해 [확인 필요]로 표시함'}])
+    text = decoded(gmail.drafts[0]).get_content()
+    assert '· 소프트웨어 버전은 이전 메일에서 찾지 못해' in text and 'mail.google.com' not in text
+    assert state.drafts_for_thread('t1')[0]['evidence'] == []
+
+
 def test_no_evidence_is_stated(settings, state):
     gmail = gmail_with_thread()
     tools = tools_for(gmail, settings, state)
@@ -204,3 +215,17 @@ def test_mcp_tool_errors_come_back_as_results(settings, state):
     from reda.mcp_server import _wrap
     tools = tools_for(gmail_with_thread(), settings, state)
     assert 'get_thread' in _wrap(tools.save_draft)('t1', '본문')['error']
+
+
+def test_tools_work_from_mcp_worker_threads(settings, tmp_path):
+    """실제 MCP 서버는 도구를 작업 스레드에서 부른다. 상태 DB를 부를 때마다 열어 스레드 문제를 피한다."""
+    gmail = gmail_with_thread()
+    identity = ident.build(personal=[ME], groups=[TEAM])
+    db_path = tmp_path / 'state.db'
+    tools = ReplyTools(gmail, None, settings, identity, state_opener=lambda: StateDB(db_path))
+    server = build_server(tools)
+    asyncio.run(server.call_tool('get_thread', {'thread_id': 't1'}))
+    result = asyncio.run(server.call_tool('save_draft', {'thread_id': 't1', 'body': '확인 후 회신드리겠습니다.'}))
+    assert 'draft-1' in str(result)
+    with StateDB(db_path) as db:
+        assert db.drafts_for_thread('t1')[0]['draft_id'] == 'draft-1'

@@ -35,25 +35,33 @@ def unmask(text, masker):
 
 
 def reference_block(evidence, ctx):
-    """evidence: [{'message_id': ..., 'what': ...}]. 보여 준 메일만 받는다."""
+    """evidence 항목 두 가지 (기획안 예시 ①②의 참고 블록 형식, `·` 줄):
+    - {'message_id': ..., 'what': ...}: 근거 메일. 이번에 보여 준 메일만 받고 링크는 코드가 붙인다
+    - {'note': ...}: 메모 (예: "소프트웨어 버전은 이전 메일에서 찾지 못해 [확인 필요]로 표시함").
+      링크를 붙이지 않으므로 근거로 위장할 수 없다
+    """
     if len(evidence) > MAX_EVIDENCE:
         raise DraftError(f'근거는 {MAX_EVIDENCE}개까지')
     lines = [REFERENCE_HEADER]
     unknown = []
     for item in evidence:
-        message_id = str((item or {}).get('message_id', '')).strip()
-        what = unmask(str((item or {}).get('what', '')).strip(), ctx.masker)[:300]
+        item = item or {}
+        message_id = str(item.get('message_id', '') or '').strip()
+        if not message_id and item.get('note'):
+            lines.append('· ' + unmask(str(item['note']).strip(), ctx.masker)[:300])
+            continue
+        what = unmask(str(item.get('what', '')).strip(), ctx.masker)[:300]
         info = ctx.known.get(message_id)
         if not info:
             unknown.append(message_id or '(빈 값)')
             continue
-        lines.append(f'- {what} — {info["date"]}, {info["from"]}, 「{info["subject"]}」 '
+        lines.append(f'· {what} — {info["date"]}, {info["from"]}, 「{info["subject"]}」 '
                      f'{gmail_link(info["thread_id"])}')
     if unknown:
         raise DraftError('근거로 쓸 수 없는 메일 ID: ' + ', '.join(unknown) +
                          '. get_thread나 search_customer_history 결과에 나온 message_id만 쓴다')
     if len(lines) == 1:
-        lines.append('- 근거로 쓴 메일 없음. 본문의 [확인 필요]를 직접 확인한다')
+        lines.append('· 근거로 쓴 메일 없음. 본문의 [확인 필요]를 직접 확인한다')
     return '\n'.join(lines)
 
 
@@ -90,5 +98,10 @@ def save(service, state, ctx, body, evidence, identity):
     draft = client.create_reply_draft(service, ctx.reply_to, text,
                                       cc=reply_cc(ctx.reply_to, identity))
     state.record_draft(draft['id'], ctx.reply_to['id'], ctx.thread_id,
-                       [e.get('message_id') for e in evidence or []])
+                       [e.get('message_id') for e in evidence or [] if e.get('message_id')])
     return draft['id'], text
+
+
+def body_checks(text):
+    """본문(참고 블록 앞)에 남은 [확인 필요] 수. 사용자가 채워야 할 곳이다."""
+    return text.split(REFERENCE_HEADER, 1)[0].count(CHECK)
