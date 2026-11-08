@@ -42,6 +42,7 @@ uv run reda profile           # 내 주소·그룹·이름 프로필 확인 (팀
 uv run reda golden export     # 골든 세트 CSV 내보내기 (tests/private/golden.csv, 정답은 사람이 채움)
 uv run reda golden eval       # 정답이 있는 메일을 분류해 놓침·확인필요 비율 출력 (분류기 API를 부름)
 uv run reda golden eval --all # 정답 없는 메일도 분류해 결과 파일에 남김 (정답 달기 전 미리 보기)
+sh scripts/local_poll_agent.sh install   # 개발용 Mac에서 15분마다 reda poll (끄기: uninstall, 상태: status)
 ```
 
 - 공개 저장소 위생 검사: `python3 -I scripts/check_public.py`. 운영 값은 git 제외 파일 `.claude/sensitive-patterns.local`(한 줄에 정규식 하나)에서 읽는다. 커밋할 때 자동으로 돈다: Claude Code의 PreToolUse hook(`.claude/settings.json`)과 로컬 git pre-commit hook(`.git/hooks/pre-commit`, git에 올라가지 않음). 새로 clone하면 pre-commit hook을 다시 설치해야 한다.
