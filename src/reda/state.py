@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (
@@ -126,6 +126,19 @@ ALTER TABLE messages ADD COLUMN priority REAL;
 """
 
 
+# 5: 자동 초안 작업 (결정 3-2). 메일마다 시도 결과를 남겨 같은 메일을 계속 다시 하지 않는다
+_SCHEMA_V5 = """
+CREATE TABLE IF NOT EXISTS draft_jobs (
+    message_id  TEXT PRIMARY KEY,
+    thread_id   TEXT NOT NULL,
+    status      TEXT NOT NULL CHECK (status IN ('drafted', 'held', 'skipped', 'failed')),
+    attempts    INTEGER NOT NULL DEFAULT 0,
+    detail      TEXT,                   -- 건너뛴 이유, 에이전트의 마지막 답, 오류
+    updated_at  TEXT NOT NULL
+);
+"""
+
+
 def _now():
     return datetime.now(timezone.utc).isoformat(timespec='seconds')
 
@@ -185,6 +198,8 @@ class StateDB:
             self._migrate_atomic(3, _SCHEMA_V3)
         if version < 4:
             self._migrate_atomic(4, _SCHEMA_V4)
+        if version < 5:
+            self._migrate_atomic(5, _SCHEMA_V5)
 
     def _migrate_atomic(self, version, script):
         """한 트랜잭션으로 묶는다. sqlite3 모듈은 DDL 앞에 BEGIN을 넣지 않으므로 직접 연다.
@@ -265,6 +280,32 @@ class StateDB:
 
     def profile_rows(self):
         return self.conn.execute('SELECT * FROM user_profile ORDER BY key').fetchall()
+
+    # ------------------------------------------------------------ 자동 초안
+    def draft_candidates(self, *, since, max_attempts):
+        """답장필요로 분류됐고 초안·보류가 아직 없는 메일 (오래된 것부터)."""
+        return self.conn.execute(
+            "SELECT m.message_id, m.thread_id FROM messages m "
+            "LEFT JOIN draft_jobs j ON j.message_id = m.message_id "
+            "WHERE m.category = '답장필요' AND m.labeled_at >= ? "
+            "AND NOT EXISTS (SELECT 1 FROM drafts d WHERE d.thread_id = m.thread_id) "
+            "AND (j.message_id IS NULL OR (j.status = 'failed' AND j.attempts < ?)) "
+            "ORDER BY m.labeled_at", (since, max_attempts)).fetchall()
+
+    def record_draft_job(self, message_id, thread_id, status, detail=''):
+        if status not in ('drafted', 'held', 'skipped', 'failed'):
+            raise ValueError(f'초안 작업 상태가 잘못됨: {status!r}')
+        with self.conn:
+            self.conn.execute(
+                'INSERT INTO draft_jobs(message_id, thread_id, status, attempts, detail, updated_at)'
+                ' VALUES (?, ?, ?, 1, ?, ?) ON CONFLICT(message_id) DO UPDATE SET'
+                ' status = excluded.status, attempts = attempts + 1, detail = excluded.detail,'
+                ' updated_at = excluded.updated_at',
+                (message_id, thread_id, status, str(detail)[:500], _now()))
+
+    def draft_job(self, message_id):
+        return self.conn.execute('SELECT * FROM draft_jobs WHERE message_id = ?',
+                                 (message_id,)).fetchone()
 
     def record_feedback(self, kind, *, message_id=None, detail=None):
         """사용자·에이전트 피드백 (초안 보류, [내 일 아님] 버튼 등). 본문은 넣지 않는다."""

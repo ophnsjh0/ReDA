@@ -59,6 +59,8 @@ def cmd_poll(args):
                 result = poll.run(service, state, settings, make_classifier(settings, identity),
                                   resync_query=args.query, max_results=args.max,
                                   identity=identity)
+                drafts = (_run_drafts(service, state, settings, quiet=True)
+                          if settings.auto_draft else None)
     except AlreadyRunning:
         print('이전 실행이 아직 끝나지 않아 이번 실행은 건너뜁니다.')
         return 0
@@ -71,7 +73,62 @@ def cmd_poll(args):
     print(f'라벨 {result.labeled}통 (규칙 {result.by_rule}, 분류기 {result.by_classifier}),'
           f' 건너뜀 {result.skipped}, 실패 {result.failed}')
     print(f'측정 기록: 라벨 변경 {result.label_events}건, 놓친 답장 {result.missed_replies}건')
+    if drafts is not None:
+        _print_drafts(drafts)
     return 0
+
+
+def _print_drafts(done):
+    if done.details:
+        print(f'자동 초안: 초안 {done.drafted}, 보류 {done.held}, 건너뜀 {done.skipped},'
+              f' 실패 {done.failed}')
+        for message_id, status, detail in done.details:
+            print(f'- {message_id}: {status} {detail[:120]}')
+
+
+def _run_drafts(service, state, settings, *, quiet=False):
+    """자동 초안. 실패해도 분류 결과에는 영향을 주지 않는다."""
+    from reda import autodraft
+    try:
+        done = autodraft.draft_pending(service, state, settings)
+    except Exception as exc:
+        print(f'자동 초안 오류: {exc.__class__.__name__}: {exc}', file=sys.stderr)
+        return None
+    if not quiet:
+        _print_drafts(done)
+    return done
+
+
+def cmd_draft_pending(args):
+    """초안을 기다리는 답장필요 메일을 초안 에이전트에게 맡긴다 (Gmail 임시보관함에 저장, 발송 없음)."""
+    from reda import autodraft
+    from reda.gmail import client
+    from reda.lock import AlreadyRunning, exclusive
+    from reda.state import StateDB
+    settings = _settings()
+    try:
+        with exclusive(settings.data_dir / 'poll.lock'):
+            service = client.get_gmail_service(settings)
+            with StateDB.open(settings) as state:
+                if args.dry_run:
+                    preview = autodraft.draft_pending(service, state, settings, dry_run=True)
+                    for message_id, status, reason in preview.details:
+                        subject = client.get_header(client.get_message_metadata(
+                            service, message_id, ('Subject',)), 'Subject')
+                        what = '맡김' if status == 'would_draft' else f'건너뜀 ({reason})'
+                        print(f'- {message_id} | {subject[:60]} → {what}')
+                    if not preview.details:
+                        print('초안을 기다리는 메일 없음')
+                    return 0
+                done = _run_drafts(service, state, settings)
+    except AlreadyRunning:
+        print('이전 실행이 아직 끝나지 않아 이번 실행은 건너뜁니다.')
+        return 0
+    if done is None:
+        return 1
+    if not done.details:
+        print('초안을 기다리는 메일 없음')
+    return 1 if done.failed else 0
 
 
 def _poll_dry_run(args):
@@ -256,6 +313,10 @@ def build_parser():
     classifier.add_argument('--try', dest='try_', action='store_true',
                             help='지어낸 고객 문의 한 통을 분류해 본다 (분류기 API를 부른다)')
     classifier.set_defaults(func=cmd_classifier)
+
+    drafts = sub.add_parser('draft-pending', help='답장필요 메일의 초안을 에이전트에게 맡김 (발송 없음)')
+    drafts.add_argument('--dry-run', action='store_true', help='맡길 메일만 보여 준다 (에이전트를 부르지 않음)')
+    drafts.set_defaults(func=cmd_draft_pending)
 
     profile = sub.add_parser('profile', help='내 주소·그룹·이름 프로필 확인 (팀 메일 담당자 판정에 씀)')
     profile.set_defaults(func=cmd_profile)

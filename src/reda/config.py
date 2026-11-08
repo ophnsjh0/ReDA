@@ -38,6 +38,16 @@ def _float(name, default):
         raise ConfigError(f'{name}는 숫자여야 함') from None
 
 
+def _int(name, default):
+    try:
+        value = int(_env(name, str(default)))
+    except ValueError:
+        raise ConfigError(f'{name}는 정수여야 함') from None
+    if value < 0:
+        raise ConfigError(f'{name}는 0 이상이어야 함')
+    return value
+
+
 def _probability(name, default):
     value = _float(name, default)
     if not 0.0 <= value <= 1.0:          # nan도 여기서 걸린다
@@ -89,6 +99,13 @@ class Settings:
     my_aliases: tuple[str, ...] = ()     # 그 밖에 불리는 이름 (영문 이름 등)
     # 내가 직접 답하는 그룹. 이 그룹으로 온 요청은 담당 단서가 없어도 확인필요 (없으면 참고)
     my_owned_groups: tuple[str, ...] = ()
+    # 자동 초안 (결정 3-2). auto_draft면 `reda poll` 끝에 `reda draft-pending`을 이어서 돈다 (개발용 Mac).
+    # VPS에서는 Hermes cron이 두 명령을 따로 부른다
+    auto_draft: bool = False
+    draft_profile: str = 'reda-dev'       # 초안을 쓸 Hermes 프로필
+    draft_max_per_run: int = 2            # 한 번에 맡기는 메일 수 (15분 실행 안에 끝나게)
+    draft_timeout: int = 300              # 메일 한 통에 기다리는 초
+    hermes_bin: str = ''                  # 비우면 PATH와 ~/.local/bin에서 찾는다
 
     @classmethod
     def from_env(cls):
@@ -113,4 +130,9 @@ class Settings:
             my_titles=_list('REDA_MY_TITLES'),
             my_aliases=_list('REDA_MY_ALIASES'),
             my_owned_groups=_addresses('REDA_MY_OWNED_GROUPS'),
+            auto_draft=_env('REDA_AUTO_DRAFT', 'false').lower() in ('1', 'true', 'yes', 'on'),
+            draft_profile=_env('REDA_DRAFT_PROFILE', 'reda-dev'),
+            draft_max_per_run=_int('REDA_DRAFT_MAX_PER_RUN', 2),
+            draft_timeout=_int('REDA_DRAFT_TIMEOUT', 300),
+            hermes_bin=_env('REDA_HERMES_BIN'),
         )

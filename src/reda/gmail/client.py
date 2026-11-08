@@ -127,6 +127,13 @@ def get_thread(service, thread_id):
     return execute(service.users().threads().get(userId='me', id=thread_id, format='full'))
 
 
+def thread_replied_after(service, thread_id, after_ms):
+    """이 스레드에 after_ms(밀리초) 뒤에 내가 보낸 메일이 있는가 (이미 답장함)."""
+    thread = execute(service.users().threads().get(userId='me', id=thread_id, format='minimal'))
+    return any('SENT' in m.get('labelIds', []) and int(m.get('internalDate') or 0) > after_ms
+               for m in thread.get('messages', []))
+
+
 def thread_has_my_reply(service, thread_id, before_ms):
     """이 스레드에 before_ms(밀리초) 전에 내가 보낸 메일이 있는가."""
     thread = execute(service.users().threads().get(userId='me', id=thread_id, format='minimal'))
