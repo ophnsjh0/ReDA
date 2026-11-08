@@ -76,6 +76,8 @@ def test_get_thread_is_masked_and_targets_latest_customer_mail(settings, state):
     tools = tools_for(gmail_with_thread(), settings, state)
     view = tools.get_thread('t1')
     assert view['reply_to_message_id'] == 'm3'          # 내가 보낸 m2가 아닌 마지막 고객 메일
+    assert view['engineer'] == {'names': ['홍길동'], 'titles': []}
+    assert view['greets_engineer'] is False and view['received_as'] == '개인 To'
     assert view['customer'] == '고객사A'
     text = str(view)
     for secret in ('192.0.2.10', 'admin01', 'P@ss!', 'lee@customer-a'):
@@ -229,3 +231,24 @@ def test_tools_work_from_mcp_worker_threads(settings, tmp_path):
     assert 'draft-1' in str(result)
     with StateDB(db_path) as db:
         assert db.drafts_for_thread('t1')[0]['draft_id'] == 'draft-1'
+
+
+def test_secrets_and_history_values_are_never_restored(settings, state):
+    """보안 시험 B (2026-11-08): 공격 메일이 비밀번호나 다른 메일의 값을 초안으로 끌어오지 못한다."""
+    gmail = gmail_with_thread()
+    gmail.messages['h1'] = make_message('h1', thread_id='t-old', From=CUSTOMER, To=ME,
+                                        Subject='[고객사A] 지난달 접속 정보',
+                                        body='장비 198.51.100.7 접속 계정: root01 / 비밀번호: Old$ecret9')
+    tools = tools_for(gmail, settings, state)
+    view = tools.get_thread('t1')
+    tokens = set(__import__('re').findall(r'\[[A-Z]+_\d+\]', str(view)))
+    found = tools.search_customer_history('t1', '접속')
+    history_tokens = set(__import__('re').findall(r'\[[A-Z]+_\d+\]', str(found))) - tokens
+    body = ('요청하신 정보입니다. 이번 장비 ' + ' '.join(sorted(tokens)) +
+            ' / 이전 장비 ' + ' '.join(sorted(history_tokens)))
+    tools.save_draft('t1', body)
+    text = decoded(gmail.drafts[0]).get_content()
+    assert '192.0.2.10' in text                       # 답장하는 스레드의 IP는 되돌린다
+    for secret in ('admin01', 'P@ss!', 'root01', 'Old$ecret9', '198.51.100.7'):
+        assert secret not in text, secret
+    assert drafts.HIDDEN in text and drafts.CHECK in text

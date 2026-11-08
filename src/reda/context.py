@@ -52,6 +52,9 @@ class ThreadContext:
     customer: str | None
     domain: str                          # 이전 메일 검색 범위 (상대방 도메인)
     known: dict = field(default_factory=dict)   # message_id → {date, from, subject, thread_id}
+    # 답장하는 스레드에서 나온 표식. 초안에서 되돌릴 수 있는 값은 이것뿐이다 (이전 메일 검색에서
+    # 나온 값은 되돌리지 않는다: 공격 메일이 다른 메일의 IP·주소를 초안으로 끌어오지 못하게)
+    thread_tokens: frozenset = frozenset()
 
     def remember(self, mail):
         self.known[mail.id] = {'date': mail.date, 'from': mail.sender, 'subject': mail.subject,
@@ -96,8 +99,15 @@ def load_thread(service, thread_id, settings, identity):
             'text': mask(_clip(latest, MESSAGE_CHARS)),
             'attachments': attachment_names(raw.get('payload')),
         })
+    ctx.thread_tokens = frozenset(ctx.masker.mapping)
     view = {
         'thread_id': thread_id,
+        # 초안을 쓰는 에이전트는 이 엔지니어가 누구인지 알아야 한다 (인사말 판단, 서명).
+        # 분류기에는 이름을 보내지 않지만(결정 2-6), 초안 모델은 어차피 서명에 이름을 쓴다
+        'engineer': {'names': list(identity.full_names) + [' '.join(w) for w in identity.latin_names],
+                     'titles': list(identity.titles)},
+        'greets_engineer': ident.greets_me(target.body, identity),
+        'received_as': ident.MODE_LABELS[identity.recipient_mode(target)],
         'subject': mask(target.subject),
         'customer': ctx.customer,
         'reply_to_message_id': target.id,
