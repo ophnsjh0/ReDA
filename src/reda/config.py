@@ -131,6 +131,11 @@ class Settings:
     urgent_alert: bool = False
     # 일정 메일 바로 알림 (9단계 버튼 제안 전까지는 알림만). 정하지 않으면 urgent_alert를 따른다
     schedule_alert: bool = False
+    # 일정 버튼 봇 (9단계, 결정 9-5). 토큰이 있으면 일정 메일은 📅 알림 대신 이 봇이 버튼으로 제안한다
+    schedule_bot_token: str = ''
+    schedule_chat_id: str = ''            # 버튼 응답을 받을 대화방 (내 텔레그램 숫자 ID)
+    calendar_token_file: Path = Path('~/.reda/calendar_token.json')   # Gmail 토큰과 따로
+    calendar_id: str = 'primary'          # 결정 9-3: 기본 캘린더
 
     @classmethod
     def from_env(cls):
@@ -166,4 +171,8 @@ class Settings:
             urgent_alert=_env('REDA_URGENT_ALERT', 'false').lower() in ('1', 'true', 'yes', 'on'),
             schedule_alert=_env('REDA_SCHEDULE_ALERT', _env('REDA_URGENT_ALERT', 'false')).lower()
             in ('1', 'true', 'yes', 'on'),
+            schedule_bot_token=_env('REDA_SCHEDULE_BOT_TOKEN'),
+            schedule_chat_id=_env('REDA_SCHEDULE_CHAT_ID'),
+            calendar_token_file=_path('REDA_CALENDAR_TOKEN_FILE', data_dir / 'calendar_token.json'),
+            calendar_id=_env('REDA_CALENDAR_ID', 'primary'),
         )

@@ -62,6 +62,7 @@ def cmd_poll(args):
                 drafts = (_run_drafts(service, state, settings, quiet=True)
                           if settings.auto_draft else None)
                 _maybe_send_alerts(service, state, settings)
+                _maybe_scan_schedules(service, state, settings, identity)
                 _maybe_send_summary(service, state, settings)
     except AlreadyRunning:
         print('이전 실행이 아직 끝나지 않아 이번 실행은 건너뜁니다.')
@@ -92,6 +93,33 @@ def _maybe_send_alerts(service, state, settings):
             print(f'급한 메일·일정 메일 {sent}통을 알렸습니다.')
     except Exception as exc:
         print(f'바로 알림 오류: {exc.__class__.__name__}: {exc}', file=sys.stderr)
+
+
+def _schedule_asker(settings, identity):
+    """메일 → 그 메일의 날짜 후보를 Jev에 묻는 함수. Jev가 아니면 None."""
+    from reda import schedule
+    from reda.classify import make_classifier
+    from reda.classify.jev import JevClassifier
+    classifier = make_classifier(settings, identity)
+    if not isinstance(classifier, JevClassifier):
+        return None
+    return lambda mail: schedule.jev_ask(classifier, mail, settings, identity)
+
+
+def _maybe_scan_schedules(service, state, settings, identity):
+    """일정 버튼 봇이 설정돼 있으면 새로 분류한 일정 메일에서 제안을 만든다 (보내기는 봇이 한다)."""
+    from reda import schedule
+    if not (settings.schedule_bot_token and settings.schedule_chat_id):
+        return
+    try:
+        ask_for = _schedule_asker(settings, identity)
+        if ask_for is None:
+            return
+        created = schedule.scan(service, state, settings, ask_for)
+        if created:
+            print(f'일정 제안 {len(created)}건을 만들었습니다 (일정 버튼 봇이 보냅니다).')
+    except Exception as exc:
+        print(f'일정 찾기 오류: {exc.__class__.__name__}: {exc}', file=sys.stderr)
 
 
 def _maybe_send_summary(service, state, settings):
@@ -170,6 +198,83 @@ def cmd_alert(args):
                 return 1
             print(f'\n→ {settings.summary_profile} 프로필의 {settings.summary_to}로 보냈습니다.')
     return 0
+
+
+def cmd_calendar_auth(args):
+    from reda import gcalendar
+    settings = _settings()
+    service = gcalendar.get_service(settings, interactive=True)
+    # calendar.events 범위로는 캘린더 정보(calendars.get)를 읽을 수 없어 일정 목록으로 확인한다
+    events = service.events().list(calendarId=settings.calendar_id, maxResults=1).execute()
+    print(f"캘린더 연결됨: {events.get('summary', settings.calendar_id)} "
+          f"(권한: 일정만, 토큰 {settings.calendar_token_file})")
+    return 0
+
+
+def cmd_schedule_preview(args):
+    """최근 N시간에 분류한 메일로 일정 제안을 미리 본다 (저장·전송하지 않음, Jev를 부름)."""
+    from datetime import datetime, timedelta, timezone
+
+    from reda import identity as ident
+    from reda import schedule
+    from reda.gmail import client
+    from reda.state import StateDB
+    settings = _settings()
+    service = client.get_gmail_service(settings)
+    since = (datetime.now(timezone.utc) - timedelta(hours=args.hours)).isoformat(timespec='seconds')
+    with StateDB.open(settings) as state:
+        identity = ident.load(settings, service=service, state=state, persist=False)
+        ask_for = _schedule_asker(settings, identity)
+        if ask_for is None:
+            print('일정 고르기는 Jev 분류기에서만 됩니다 (REDA_CLASSIFIER=jev).', file=sys.stderr)
+            return 1
+        found = schedule.preview(service, state, settings, ask_for, since=since)
+    if not found:
+        print(f'최근 {args.hours}시간에 제안할 일정이 없습니다.')
+    for mail, picked in found:
+        item = picked.item
+        print(f'- {schedule.title_from(mail.subject)} | {item.describe() if item.clear else "날짜 확인 필요"}'
+              f' | Jev {picked.probability:.2f} | 근거: {item.sentence[:80]}'
+              + (f' | {item.conflict or item.assumed}' if (item.conflict or item.assumed) else ''))
+    return 0
+
+
+def cmd_schedule_list(args):
+    from reda.state import StateDB
+    settings = _settings()
+    with StateDB.open(settings) as state:
+        rows = state.conn.execute('SELECT * FROM schedule_proposals ORDER BY id DESC LIMIT ?',
+                                  (args.limit,)).fetchall()
+    for r in rows:
+        print(f"{r['id']:>4} {r['status']:<8} {r['start_at'] or '날짜 확인 필요':<26} {r['title'][:50]}")
+    if not rows:
+        print('일정 제안이 없습니다.')
+    return 0
+
+
+def cmd_schedule_bot(args):
+    """일정 버튼 봇을 띄운다 (끝내려면 Ctrl+C). 버튼을 누른 제안만 캘린더에 넣는다."""
+    from reda import gcalendar
+    from reda.schedule_bot import ScheduleBot, Telegram
+    from reda.state import StateDB
+    settings = _settings()
+    if not (settings.schedule_bot_token and settings.schedule_chat_id.isdigit()):
+        print('REDA_SCHEDULE_BOT_TOKEN과 REDA_SCHEDULE_CHAT_ID(숫자)를 .env에 넣어 주세요.', file=sys.stderr)
+        return 1
+    calendar = {}
+
+    def create_event(proposal):
+        if 'service' not in calendar:
+            calendar['service'] = gcalendar.get_service(settings)
+        return gcalendar.create_event(calendar['service'], proposal, settings.calendar_id)
+
+    with StateDB.open(settings) as state:
+        bot = ScheduleBot(Telegram(settings.schedule_bot_token), state, settings.schedule_chat_id,
+                          create_event)
+        try:
+            bot.run(log=lambda m: print(m, flush=True))
+        except KeyboardInterrupt:
+            return 0
 
 
 def _print_drafts(done):
@@ -396,6 +501,23 @@ def build_parser():
     gmail_sub = gmail.add_subparsers(dest='gmail_command', required=True)
     auth = gmail_sub.add_parser('auth', help='브라우저로 Google 동의를 받아 토큰 저장 (개발용)')
     auth.set_defaults(func=cmd_gmail_auth)
+
+    cal = sub.add_parser('calendar', help='Google 캘린더 연결 (일정 만들기 권한만)')
+    cal_sub = cal.add_subparsers(dest='calendar_command', required=True)
+    cal_auth = cal_sub.add_parser('auth', help='브라우저로 캘린더 동의를 받아 따로 토큰 저장')
+    cal_auth.set_defaults(func=cmd_calendar_auth)
+
+    sched = sub.add_parser('schedule', help='메일 속 일정 제안 (9단계)')
+    sched_sub = sched.add_subparsers(dest='schedule_command', required=True)
+    sched_preview = sched_sub.add_parser('preview', help='최근 메일로 일정 제안 미리 보기 (저장·전송 없음)')
+    sched_preview.add_argument('--hours', type=int, default=24)
+    sched_preview.set_defaults(func=cmd_schedule_preview)
+    sched_list = sched_sub.add_parser('list', help='일정 제안 목록')
+    sched_list.add_argument('--limit', type=int, default=20)
+    sched_list.set_defaults(func=cmd_schedule_list)
+
+    bot = sub.add_parser('schedule-bot', help='일정 버튼 봇 실행 (버튼을 누른 일정만 캘린더에 등록)')
+    bot.set_defaults(func=cmd_schedule_bot)
 
     poll = sub.add_parser('poll', help='새 메일 가져오기')
     poll.add_argument('--dry-run', action='store_true', help='라벨을 붙이지 않고 목록과 규칙 필터 결과만 출력')

@@ -45,6 +45,9 @@ uv run reda golden eval --all # 정답 없는 메일도 분류해 결과 파일�
 sh scripts/local_poll_agent.sh install   # 개발용 Mac에서 15분마다 reda poll (끄기: uninstall, 상태: status)
 uv run reda draft-pending --dry-run      # 자동 초안에 맡길 메일 보기 (빼면 실제로 맡긴다, 발송 없음)
 uv run reda summary --hours 24           # 출근 전 요약 보기 (--send면 메신저로 보냄)
+uv run reda schedule preview --hours 24  # 메일 속 일정 제안 미리 보기 (저장·전송 없음, Jev를 부름)
+uv run reda calendar auth                # 캘린더 연결 (calendar.events만, Gmail과 다른 토큰)
+uv run reda schedule-bot                 # 일정 버튼 봇 (누른 일정만 캘린더에 등록)
 uv run reda alert --hours 24             # 급한 메일·일정 메일 알림 미리 보기 (REDA_URGENT_ALERT·REDA_SCHEDULE_ALERT면 poll이 바로 알림)
 ```
 

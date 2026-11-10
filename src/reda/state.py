@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS messages (
@@ -139,6 +139,30 @@ CREATE TABLE IF NOT EXISTS draft_jobs (
 """
 
 
+# 6: 일정 제안 (9단계). 메일 속 일정을 버튼으로 확인받고, 등록을 누른 것만 캘린더에 넣는다
+_SCHEMA_V6 = """
+CREATE TABLE IF NOT EXISTS schedule_proposals (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id  TEXT NOT NULL,
+    thread_id   TEXT NOT NULL,
+    sentence    TEXT NOT NULL,          -- 근거 문장 (원문)
+    title       TEXT NOT NULL,
+    start_at    TEXT,                   -- ISO (시간대 포함). 종일이면 날짜만, 날짜를 모르면 NULL
+    end_at      TEXT,
+    all_day     INTEGER NOT NULL DEFAULT 0,
+    note        TEXT,                   -- 코드가 짐작한 것, 날짜를 묻는 이유
+    status      TEXT NOT NULL CHECK (status IN
+                ('new', 'proposed', 'asked', 'editing', 'added', 'ignored', 'failed')),
+    chat_message_id TEXT,               -- 버튼 메시지 (텔레그램 message_id)
+    event_id    TEXT,                   -- 등록한 캘린더 일정
+    detail      TEXT,
+    created_at  TEXT NOT NULL,
+    updated_at  TEXT NOT NULL,
+    UNIQUE (message_id, sentence)
+);
+"""
+
+
 def _now():
     return datetime.now(timezone.utc).isoformat(timespec='seconds')
 
@@ -200,6 +224,8 @@ class StateDB:
             self._migrate_atomic(4, _SCHEMA_V4)
         if version < 5:
             self._migrate_atomic(5, _SCHEMA_V5)
+        if version < 6:
+            self._migrate_atomic(6, _SCHEMA_V6)
 
     def _migrate_atomic(self, version, script):
         """한 트랜잭션으로 묶는다. sqlite3 모듈은 DDL 앞에 BEGIN을 넣지 않으므로 직접 연다.
@@ -404,3 +430,39 @@ class StateDB:
         return self.conn.execute(
             'SELECT * FROM failures WHERE attempts < ? ORDER BY updated_at',
             (max_attempts,)).fetchall()
+
+    # ------------------------------------------------------------ schedule (9단계)
+    def add_proposal(self, message_id, thread_id, *, sentence, title, start_at, end_at,
+                     all_day, note, status):
+        """새 제안을 넣고 id를 돌려준다. 같은 메일·같은 문장이 이미 있으면 None (두 번 제안하지 않는다)."""
+        now = _now()
+        with self.conn:
+            cur = self.conn.execute(
+                'INSERT OR IGNORE INTO schedule_proposals(message_id, thread_id, sentence, title,'
+                ' start_at, end_at, all_day, note, status, created_at, updated_at)'
+                ' VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                (message_id, thread_id, sentence, title, start_at, end_at, int(bool(all_day)),
+                 note, status, now, now))
+        return cur.lastrowid if cur.rowcount else None
+
+    def proposal(self, proposal_id):
+        return self.conn.execute('SELECT * FROM schedule_proposals WHERE id = ?',
+                                 (proposal_id,)).fetchone()
+
+    def proposals(self, *statuses):
+        marks = ','.join('?' * len(statuses))
+        return self.conn.execute(
+            f'SELECT * FROM schedule_proposals WHERE status IN ({marks}) ORDER BY id',
+            statuses).fetchall()
+
+    def update_proposal(self, proposal_id, **fields):
+        allowed = {'status', 'chat_message_id', 'event_id', 'detail', 'start_at', 'end_at',
+                   'all_day', 'note'}
+        unknown = set(fields) - allowed
+        if unknown:
+            raise ValueError(f'바꿀 수 없는 칸: {sorted(unknown)}')
+        fields['updated_at'] = _now()
+        sets = ', '.join(f'{k} = ?' for k in fields)
+        with self.conn:
+            self.conn.execute(f'UPDATE schedule_proposals SET {sets} WHERE id = ?',
+                              (*fields.values(), proposal_id))

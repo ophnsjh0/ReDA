@@ -203,7 +203,9 @@ def send_alerts(service, state, settings, *, sender=None):
     items, schedules, mark = alerts(state, after=after)
     if settings is not None:
         items = items if settings.urgent_alert else []
-        schedules = schedules if settings.schedule_alert else []
+        # 일정 버튼 봇이 있으면 일정 메일은 그 봇이 버튼으로 제안한다 (여기서 또 알리지 않는다)
+        schedules = schedules if settings.schedule_alert and not getattr(
+            settings, 'schedule_bot_token', '') else []
     if items or schedules:
         fill_headers(service, Summary(since=after, items=items + schedules))
         sender(settings, render_alert(items, schedules))
