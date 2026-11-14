@@ -1,0 +1,32 @@
+# VPS의 Hermes 프로필 `reda` (초안 에이전트). server-setup.sh가 맨 앞에 model 블록을 붙여
+# <REDA_ROOT>/hermes/profiles/reda/config.yaml로 둔다. 비밀 값(API 키, 봇 토큰)은 같은 폴더의 .env에,
+# 구독 로그인(openai-codex)은 같은 폴더의 auth.json에 있다 (서버에서 따로 로그인).
+
+# 에이전트가 쓸 수 있는 도구는 reda-mcp뿐이다 (terminal, code_execution, browser, file 등은 없음).
+# 이 도구들이 있으면 에이전트가 토큰 파일을 읽어 Gmail 발송 API를 직접 부를 수 있다 (구현계획 "발송 차단 장치").
+platform_toolsets:
+  cli:
+    - mcp-reda
+  telegram:
+    - mcp-reda
+
+mcp_servers:
+  reda:
+    command: /opt/reda/.venv/bin/reda-mcp
+    args: []
+    env:
+      REDA_ENV_FILE: /opt/reda-data/reda.env
+      REDA_DATA_DIR: /opt/reda-data
+      REDA_GMAIL_TOKEN_FILE: /opt/reda-data/token.json
+      REDA_GMAIL_CREDENTIALS_FILE: /opt/reda-data/credentials.json
+      REDA_CALENDAR_TOKEN_FILE: /opt/reda-data/calendar_token.json
+      TZ: KST-9
+    connect_timeout: 60.0
+    enabled: true
+    tools:
+      include: [get_thread, search_customer_history, get_writing_samples, save_draft, hold_draft, set_label]
+      prompts: false
+      resources: false
+
+plugins:
+  enabled: []
