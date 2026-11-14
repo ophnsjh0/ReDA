@@ -320,6 +320,12 @@ class StateDB:
         return self.conn.execute('SELECT * FROM feedback WHERE kind = ? ORDER BY id',
                                  (kind,)).fetchall()
 
+    def feedback_for(self, message_id, kinds):
+        marks = ','.join('?' * len(kinds))
+        return self.conn.execute(
+            f'SELECT * FROM feedback WHERE message_id = ? AND kind IN ({marks}) ORDER BY id',
+            (message_id, *kinds)).fetchall()
+
     def upsert_alias(self, alias, kind, source, status='confirmed'):
         """없으면 더한다. 이미 있으면 상태를 바꾸지 않는다 (사용자가 거절한 별칭을 되살리지 않는다)."""
         if status not in ('candidate', 'confirmed', 'rejected'):

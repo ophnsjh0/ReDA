@@ -97,7 +97,8 @@ def load_thread(service, thread_id, settings, identity):
             'cc': [mask(a) for a in mail.cc],
             'sent_by_me': 'SENT' in mail.label_ids,
             'text': mask(_clip(latest, MESSAGE_CHARS)),
-            'attachments': attachment_names(raw.get('payload')),
+            # 첨부 이름에도 IP·계정이 들어간다 (예: '192.0.2.10_admin.log')
+            'attachments': [mask(n) for n in attachment_names(raw.get('payload'))],
         })
     ctx.thread_tokens = frozenset(ctx.masker.mapping)
     view = {

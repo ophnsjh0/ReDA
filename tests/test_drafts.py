@@ -86,6 +86,18 @@ def test_get_thread_is_masked_and_targets_latest_customer_mail(settings, state):
     assert [m['sent_by_me'] for m in view['messages']] == [False, True, False]
 
 
+def test_attachment_names_are_masked(settings, state):
+    gmail = gmail_with_thread()
+    gmail.messages['m3']['payload']['parts'] = [
+        {'filename': '192.0.2.77_admin_dump.log', 'mimeType': 'text/plain', 'body': {}},
+        {'filename': 'acct=custadmin.txt', 'mimeType': 'text/plain', 'body': {}}]
+    view = tools_for(gmail, settings, state).get_thread('t1')
+    names = view['messages'][-1]['attachments']
+    assert len(names) == 2
+    for secret in ('192.0.2.77', 'custadmin'):
+        assert secret not in str(names)
+
+
 def test_history_search_is_limited_to_counterpart_domain(settings, state):
     gmail = gmail_with_thread()
     tools = tools_for(gmail, settings, state)
