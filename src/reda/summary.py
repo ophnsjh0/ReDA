@@ -52,7 +52,7 @@ class Summary:
 
 
 def _draft_state(state, row):
-    if state.drafts_for_thread(row['thread_id']):
+    if state.draft_for_message(row['message_id']):
         return '초안 있음'
     job = state.draft_job(row['message_id'])
     if job is None:
@@ -64,12 +64,16 @@ def _item(state, row, now):
     detail = json.loads(row['classifier_detail'] or '{}')
     labeled = datetime.fromisoformat(row['labeled_at'])
     waiting = max(0.0, (now - labeled).total_seconds() / 3600)
-    c = Classification(row['category'], row['urgency'] or '보통', row['reason'] or '',
-                       urgency_score=detail.get('urgency_score'))
+    if row['priority'] is not None:      # poll이 고객사 가산점까지 넣어 저장한 값
+        score = prio.with_waiting(row['priority'], row['category'], waiting)
+    else:
+        c = Classification(row['category'], row['urgency'] or '보통', row['reason'] or '',
+                           urgency_score=detail.get('urgency_score'))
+        score = prio.priority(c, waiting_hours=waiting)
     return Item(
         message_id=row['message_id'], thread_id=row['thread_id'], category=row['category'],
         urgency=row['urgency'] or '보통', todo=detail.get('todo', ''), draft=_draft_state(state, row),
-        priority=prio.priority(c, waiting_hours=waiting))
+        priority=score)
 
 
 def collect(state, *, since):
@@ -87,12 +91,26 @@ def collect(state, *, since):
     return summary
 
 
+def _by_priority(items, category):
+    return sorted((i for i in items if i.category == category), key=lambda i: -i.priority)
+
+
+def shown_items(items):
+    """요약·알림에 실제로 보이는 메일 (render·render_alert와 같은 순서·개수)."""
+    shown = (_by_priority(items, LABEL_REPLY)[:LIST_MAX] + _by_priority(items, LABEL_CHECK)[:LIST_MAX]
+             + [i for i in items if i.todo][:LIST_MAX])
+    unique = {id(i): i for i in shown}
+    return list(unique.values())
+
+
 def fill_headers(service, summary):
-    """보여 줄 메일의 제목·보낸 사람을 Gmail에서 가져와 가린다."""
+    """요약에 보일 메일의 제목·보낸 사람을 Gmail에서 가져와 가린다."""
+    fill_items(service, shown_items(summary.items))
+
+
+def fill_items(service, items):
     masker = Masker()
-    shown = [i for i in summary.items if i.category != LABEL_FYI][:LIST_MAX * 2]
-    shown += [i for i in summary.items if i.category == LABEL_FYI][:LIST_MAX]
-    for item in shown:
+    for item in items:
         try:
             meta = client.get_message_metadata(service, item.message_id, ('Subject', 'From'))
         except Exception:
@@ -114,10 +132,8 @@ def _line(item, *, link=True):
 
 def render(summary, *, period='지난 요약 이후'):
     c = summary.counts
-    replies = sorted((i for i in summary.items if i.category == LABEL_REPLY),
-                     key=lambda i: -i.priority)
-    checks = sorted((i for i in summary.items if i.category == LABEL_CHECK),
-                    key=lambda i: -i.priority)
+    replies = _by_priority(summary.items, LABEL_REPLY)
+    checks = _by_priority(summary.items, LABEL_CHECK)
     todos = [i for i in summary.items if i.todo]
     drafted = sum(1 for i in replies if i.draft == '초안 있음')
     held = sum(1 for i in replies if i.draft == '보류')
@@ -139,10 +155,11 @@ def render(summary, *, period='지난 요약 이후'):
     if todos:
         lines += ['', '📅 일정·할 일 (캘린더 등록은 9단계에서)']
         lines += [f'· [{i.todo}] {i.subject} — {i.sender}' for i in todos[:LIST_MAX]]
+    failure_note = ['', f'⚠️ 처리하지 못한 메일 {summary.failures}통 (다음 실행에서 다시 시도)']
     if summary.failures:
-        lines += ['', f'⚠️ 처리하지 못한 메일 {summary.failures}통 (다음 실행에서 다시 시도)']
-    if summary.total == 0:
-        lines = [f'📬 {period} 새로 분류한 메일이 없어요']
+        lines += failure_note
+    if summary.total == 0:     # 장애로 아무것도 분류하지 못했을 때도 실패 경고는 남긴다
+        lines = [f'📬 {period} 새로 분류한 메일이 없어요'] + (failure_note if summary.failures else [])
     return '\n'.join(lines)
 
 
@@ -205,7 +222,7 @@ def send_alerts(service, state, settings, *, sender=None):
         items = items if settings.urgent_alert else []
         schedules = schedules if settings.schedule_alert else []
     if items or schedules:
-        fill_headers(service, Summary(since=after, items=items + schedules))
+        fill_items(service, items[:LIST_MAX] + schedules[:LIST_MAX])     # render_alert가 보이는 것
         sender(settings, render_alert(items, schedules))
     if mark != after:
         state.set_sync(ALERT_KEY, mark)

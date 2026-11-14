@@ -288,7 +288,7 @@ class StateDB:
             "SELECT m.message_id, m.thread_id FROM messages m "
             "LEFT JOIN draft_jobs j ON j.message_id = m.message_id "
             "WHERE m.category = '답장필요' AND m.labeled_at >= ? "
-            "AND NOT EXISTS (SELECT 1 FROM drafts d WHERE d.thread_id = m.thread_id) "
+            "AND NOT EXISTS (SELECT 1 FROM drafts d WHERE d.message_id = m.message_id) "
             "AND (j.message_id IS NULL OR (j.status = 'failed' AND j.attempts < ?)) "
             "ORDER BY m.labeled_at", (since, max_attempts)).fetchall()
 
@@ -355,6 +355,11 @@ class StateDB:
                 ' created_at) VALUES (?, ?, ?, ?, ?)',
                 (draft_id, message_id, thread_id, json.dumps(list(evidence), ensure_ascii=False),
                  _now()))
+
+    def draft_for_message(self, message_id):
+        """이 메일에 답하는 ReDA 초안 (메일 단위로 하나). 같은 스레드에 새 고객 메일이 오면 새로 만든다."""
+        return self.conn.execute('SELECT * FROM drafts WHERE message_id = ? LIMIT 1',
+                                 (message_id,)).fetchone()
 
     def drafts_for_thread(self, thread_id):
         rows = self.conn.execute(

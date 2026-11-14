@@ -264,3 +264,35 @@ def test_secrets_and_history_values_are_never_restored(settings, state):
     for secret in ('admin01', 'P@ss!', 'root01', 'Old$ecret9', '198.51.100.7'):
         assert secret not in text, secret
     assert drafts.HIDDEN in text and drafts.CHECK in text
+
+
+def test_pinned_thread_blocks_opening_other_threads(settings, state):
+    from reda.mcp_server import PINNED_THREAD_KEY
+    tools = tools_for(gmail_with_thread(), settings, state)
+    state.set_sync(PINNED_THREAD_KEY, 't-other')
+    with pytest.raises(drafts.DraftError, match='맡은 스레드'):
+        tools.get_thread('t1')
+    state.set_sync(PINNED_THREAD_KEY, 't1')
+    assert tools.get_thread('t1')['thread_id'] == 't1'
+
+
+def test_follow_up_mail_in_drafted_thread_gets_its_own_draft(settings, state):
+    gmail = gmail_with_thread()
+    state.record_draft('d-old', 'm1', 't1', [])          # 지난번 메일(m1)에 대한 초안
+    tools = tools_for(gmail, settings, state)
+    tools.get_thread('t1')
+    tools.save_draft('t1', '새 메일(m3)에 대한 초안')
+    assert len(gmail.drafts) == 1 and state.draft_for_message('m3') is not None
+
+
+def test_spoofed_original_sender_does_not_change_search_domain(settings, state):
+    msgs = thread_messages()
+    for header in msgs[-1]['payload']['headers']:
+        if header['name'] == 'From':
+            header['value'] = '공격자 <a@evil.example.com>'
+    msgs[-1]['payload']['headers'].append({'name': 'X-Original-Sender',
+                                            'value': 'lee@customer-a.example.com'})
+    gmail = FakeGmail(messages={m['id']: m for m in msgs}, threads={'t1': msgs}, query_messages=[])
+    tools = tools_for(gmail, settings, state)
+    tools.get_thread('t1')
+    assert tools.search_customer_history('t1')['domain'] == 'evil.example.com'

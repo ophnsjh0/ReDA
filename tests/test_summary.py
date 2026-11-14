@@ -198,3 +198,33 @@ def test_schedule_alert_setting_defaults_to_urgent(monkeypatch, tmp_path):
     assert Settings.from_env().schedule_alert is True
     monkeypatch.setenv('REDA_SCHEDULE_ALERT', 'false')
     assert Settings.from_env().schedule_alert is False
+
+
+def test_customer_bonus_from_poll_is_kept_in_summary_order(state):
+    # 같은 긴급도라도 poll이 고객사 가산점을 넣어 저장한 메일이 먼저다
+    state.record_classification('in', 't-in', '답장필요', urgency='보통', priority=1.5)
+    state.record_classification('cu', 't-cu', '답장필요', urgency='보통', priority=2.0)
+    items = summary.collect(state, since='2000-01-01').items
+    order = [i.message_id for i in sorted(items, key=lambda i: -i.priority)]
+    assert order == ['cu', 'in']
+
+
+def test_headers_are_filled_for_every_shown_mail_even_when_many(state):
+    # 덜 급한 메일 25통 뒤에 가장 급한 메일이 마지막으로 분류돼도 제목이 채워진다
+    ids = [f'm{n:02}' for n in range(25)] + ['top']
+    for mid in ids:
+        state.record_classification(mid, f't-{mid}', '답장필요', urgency='보통', priority=1.0)
+    state.conn.execute("UPDATE messages SET priority = 3.0, urgency = '높음' WHERE message_id = 'top'")
+    collected = summary.collect(state, since='2000-01-01')
+    msgs = {mid: make_message(mid, thread_id=f't-{mid}', From='이차장 <lee@cust.example.com>',
+                              Subject=f'제목 {mid}') for mid in ids}
+    summary.fill_headers(FakeGmail(messages=msgs), collected)
+    reply_part = summary.render(collected).split('✉️ 답장필요', 1)[1]
+    assert reply_part.split('\n')[1].startswith('1. 🔴 제목 top')
+    assert ' — \n' not in reply_part and '.  — ' not in reply_part
+
+
+def test_empty_summary_still_warns_about_failures(state):
+    state.record_failure('bad', 't-bad', 'Gmail 500')
+    text = summary.render(summary.collect(state, since='2000-01-01'))
+    assert '새로 분류한 메일이 없어요' in text and '처리하지 못한 메일 1통' in text

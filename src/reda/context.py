@@ -62,13 +62,18 @@ class ThreadContext:
 
 
 def _counterpart_domain(mail, identity):
-    """상대방 도메인: 원래 보낸 사람(그룹 중계면 진짜 보낸 사람)의 도메인. 우리 회사 도메인이면 ''."""
-    sender = address_of(mail.original_sender) or mail.sender_address
-    if '@' not in sender:
-        return ''
-    domain = sender.rsplit('@', 1)[1]
+    """상대방 도메인: 보낸 사람의 도메인. 우리 회사 도메인이면 ''.
+    X-Original-Sender는 보낸 사람이 마음대로 붙일 수 있는 헤더라, From이 우리 회사 주소(그룹이 바꾼
+    From)일 때만 진짜 보낸 사람으로 본다. 밖에서 온 메일이 이 헤더로 다른 고객사를 검색 범위로 끌어오지 못하게."""
     own = {a.split('@', 1)[1] for a in identity.personal | identity.groups if '@' in a}
-    return '' if domain in own else domain
+
+    def domain_of(address):
+        return address.rsplit('@', 1)[1] if '@' in address else ''
+
+    domain = domain_of(mail.sender_address)
+    if domain in own:
+        domain = domain_of(address_of(mail.original_sender))
+    return '' if not domain or domain in own else domain
 
 
 def load_thread(service, thread_id, settings, identity):
