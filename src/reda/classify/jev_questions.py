@@ -114,6 +114,21 @@ QUESTIONS = {
 NOULS = tuple(k for k, q in QUESTIONS.items() if q['type'] == 'noul')
 
 
+# 9단계 일정 제안: 코드가 찾은 날짜 문장(후보)마다 하나씩 묻는다. 후보는 state의 `candidates.<id>`에 있다
+def schedule_question(candidate_id):
+    return {
+        'type': 'noul',
+        'instructions': f'`candidates.{candidate_id}.sentence`의 날짜는 받는 사람이 그때 참석하거나 직접 '
+                        '해야 하는 일정인가?',
+        'criteria': {
+            'true': '받는 사람이 그 날짜·시간에 가거나 일을 해야 한다. 예: 방문 요청, 점검·회의·교육 참석, '
+                    '작업 일정, 제출 마감',
+            'false': '받는 사람이 그때 할 일이 없는 날짜다. 예: 이미 지난 일의 날짜, 다른 사람만 하는 일정, '
+                     '보증 만료일·출시일 같은 정보로 적힌 날짜',
+        },
+    }
+
+
 def answers_to_values(body):
     """Jev 응답 → {'asks_reply': 0.92, ..., 'urgency': {'score': 1.4, 'p': [..4개..]}}.
     형식이 틀리면 None."""
