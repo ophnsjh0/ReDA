@@ -9,6 +9,8 @@ SUN = datetime(2026, 11, 8, 19, 0, tzinfo=KST)          # 2026-11-08 일요일
 WED = datetime(2026, 11, 11, 9, 0, tzinfo=KST)          # 수요일
 MONTH_END = datetime(2026, 4, 29, 10, 0, tzinfo=KST)    # 4월 29일 수요일
 YEAR_END = datetime(2026, 12, 28, 10, 0, tzinfo=KST)    # 12월 28일 월요일
+FRI = datetime(2026, 11, 13, 17, 0, tzinfo=KST)         # 금요일 저녁
+LEAP = datetime(2028, 2, 27, 10, 0, tzinfo=KST)         # 2028 윤년, 2/27 일요일
 
 
 def one(body, received=WED):
@@ -44,6 +46,39 @@ def one(body, received=WED):
     ('Let us meet next Tuesday at 10:30 am.', WED, date(2026, 11, 17)),
     ('Are you available tomorrow?', WED, date(2026, 11, 12)),
     ('Could you join on Friday?', WED, date(2026, 11, 13)),
+    # 형식 (검증기준 9단계: 50개 이상)
+    ('11월 30일(월) 오전 9시 점검', SUN, date(2026, 11, 30)),
+    ('12월 1일 화요일 방문', SUN, date(2026, 12, 1)),               # 괄호 없는 요일
+    ('2026.11.25 작업 예정', SUN, date(2026, 11, 25)),
+    ('2026/11/25 작업 예정', SUN, date(2026, 11, 25)),
+    ('26년 11월 25일 작업', SUN, date(2026, 11, 25)),
+    ('오는 11월 20일 금요일 회의', SUN, date(2026, 11, 20)),
+    ('금주 금요일 점검', WED, date(2026, 11, 13)),
+    ('다음주 수요일 오후 2시', WED, date(2026, 11, 18)),
+    ('다다음 주 월요일 점검', WED, date(2026, 11, 23)),
+    # 주말 직전에 받은 메일
+    ('내일 오후 4시 통화', FRI, date(2026, 11, 14)),
+    ('월요일 오전 10시 점검', FRI, date(2026, 11, 16)),
+    ('다음 주 금요일 점검', FRI, date(2026, 11, 20)),
+    ('next Monday works for us', FRI, date(2026, 11, 16)),
+    # 월말
+    ('5월 4일(월) 점검', MONTH_END, date(2026, 5, 4)),
+    ('4월 30일 마감', MONTH_END, date(2026, 4, 30)),
+    ('모레 점검', MONTH_END, date(2026, 5, 1)),
+    # 연말·윤년
+    ('12월 31일 작업', YEAR_END, date(2026, 12, 31)),
+    ('1월 2일 오전 작업', YEAR_END, date(2027, 1, 2)),
+    ('2027년 1월 4일 회의', YEAR_END, date(2027, 1, 4)),
+    ('다음 주 월요일 회의', YEAR_END, date(2027, 1, 4)),
+    ('on 12/31 we will patch', YEAR_END, date(2026, 12, 31)),
+    ('2월 29일 점검', LEAP, date(2028, 2, 29)),
+    ('다음 주 수요일 점검', LEAP, date(2028, 3, 1)),
+    # 영문
+    ('Meeting on November 20, 2026 at 3 PM', SUN, date(2026, 11, 20)),
+    ('Maintenance: 2026-11-20 22:00 KST', SUN, date(2026, 11, 20)),
+    ('See you on Monday, Nov 16.', SUN, date(2026, 11, 16)),        # 날짜 앞에 쓴 요일
+    ('Please join the call on Dec 1st.', SUN, date(2026, 12, 1)),
+    ('this Friday at 3pm', WED, date(2026, 11, 13)),
 ])
 def test_dates(body, received, expected):
     item = one(body, received)
@@ -74,7 +109,10 @@ def test_assumed_afternoon_and_duration():
 
 
 @pytest.mark.parametrize('body', ['다음 주쯤 방문 가능하실까요?', '조만간 점검 일정 잡겠습니다',
-                                  '일정 조율 후 다시 연락드리겠습니다', 'Let us meet sometime next week.'])
+                                  '일정 조율 후 다시 연락드리겠습니다', 'Let us meet sometime next week.',
+                                  # 흐린 표현에 요일이 붙어도 묻는다 (틀린 주로 제안하지 않는다)
+                                  '다음 주쯤 목요일에 방문 부탁드립니다', 'next week on Tuesday we will visit',
+                                  '다음 주 중 화요일 오후 2시 점검', '일정 조율 후 목요일 방문'])
 def test_vague_dates_are_not_proposed(body):
     item = one(body, WED)
     assert item.vague and not item.clear
@@ -82,6 +120,8 @@ def test_vague_dates_are_not_proposed(body):
 
 def test_weekday_conflict_and_past_dates():
     assert '요일이 맞지 않음' in one('11월 12일(수) 점검', SUN).conflict
+    assert '요일이 맞지 않음' in one('12월 1일 수요일 방문', SUN).conflict      # 괄호 없는 요일도 검사
+    assert '요일이 맞지 않음' in one('See you on Tuesday, Nov 16.', SUN).conflict
     assert one('11월 2일 점검 결과 공유드립니다', SUN).past          # 지난 일
     weekend = one('이번 주 목요일 점검', SUN)                        # 일요일에 받은 '이번 주'
     assert not weekend.clear and '이번 주' in weekend.conflict
@@ -95,3 +135,43 @@ def test_not_dates():
 def test_timezone_mark():
     item = one('The window is Nov 12 9:00 PST.', SUN)
     assert item.tz == 'PST' and item.starts_at().utcoffset().total_seconds() == -8 * 3600
+
+
+def test_long_sentence_is_not_cut_inside_an_address():
+    body = '11월 12일 점검 ' + '가' * 180 + ' 대상 192.0.2.123 장비'
+    item = one(body, SUN)
+    assert len(item.sentence) <= 200 and '192.0' not in item.sentence
+
+
+@pytest.mark.parametrize('body, start, end', [
+    ('11월 20일 02:00~04:00 정기 점검 작업', time(2), time(4)),     # 콜론 형식은 쓴 그대로 (새벽 작업)
+    ('11/12 03:00-05:00', time(3), time(5)),                        # 봇의 시간 수정 예시 형식
+    ('11월 12일 3시~5시 회의', time(15), time(17)),                 # 'N시'만 오후로 짐작
+])
+def test_colon_times_are_24_hour(body, start, end):
+    item = one(body, SUN)
+    assert (item.start, item.end) == (start, end), item
+
+
+@pytest.mark.parametrize('body', [
+    '다음 주 일정 공유드립니다', '이번 주 목표는 안정화입니다', '다음 주 수정 예정입니다',
+    'The error rate will decrease 10 percent', 'We marked 3 tickets as done', 'Step 2 may fail',
+    'The novel 5 method',
+])
+def test_ordinary_words_are_not_dates(body):
+    assert [f for f in find(body, SUN) if f.date] == []
+
+
+def test_invalid_first_match_does_not_hide_a_real_date():
+    item = one('24/7 지원 드리며 11월 20일 14시 방문 예정', SUN)
+    assert item.date == date(2026, 11, 20) and item.clear
+
+
+def test_ambiguous_time_zone_is_asked():
+    item = one('Call at 2pm CST on Nov 20', SUN)
+    assert not item.clear and 'CST' in item.conflict
+
+
+def test_bare_weekday_after_week_word_still_works():
+    assert one('다음 주 화(17일) 방문', WED).date == date(2026, 11, 17)
+    assert one('May 5 maintenance', SUN).date == date(2027, 5, 5)

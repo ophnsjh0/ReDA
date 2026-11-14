@@ -131,7 +131,10 @@ class ScheduleBot:
         chat = str(((query.get('message') or {}).get('chat') or {}).get('id'))
         if chat != self.chat_id or str((query.get('from') or {}).get('id')) != self.chat_id:
             return 'ignored: other chat'       # 버튼은 정해 둔 사람만 누를 수 있다
-        self.tg.call('answerCallbackQuery', callback_query_id=query['id'])
+        try:      # 오래된 버튼 응답(봇 재시작 뒤)은 실패하지만 누른 동작은 처리한다
+            self.tg.call('answerCallbackQuery', callback_query_id=query.get('id', ''))
+        except TelegramError:
+            pass
         action, _, pid = (query.get('data') or '').partition(':')
         proposal = self.state.proposal(int(pid)) if pid.isdigit() else None
         if proposal is None or proposal['status'] in ('added', 'ignored'):
@@ -195,7 +198,12 @@ class ScheduleBot:
         results = []
         for update in updates:
             self._offset = update['update_id'] + 1
-            results.append(self.handle(update))
+            try:
+                results.append(self.handle(update))
+            except TelegramError:
+                raise
+            except Exception as exc:  # 메시지 하나의 오류(DB 잠김, 이상한 입력)로 봇이 멈추지 않게
+                results.append(f'error: {exc.__class__.__name__}')
         return results
 
     def run(self, *, sleep=time.sleep, log=print):
@@ -204,6 +212,6 @@ class ScheduleBot:
             try:
                 self.send_new()
                 self.poll_once()
-            except TelegramError as exc:
-                log(f'오류: {exc}')
+            except Exception as exc:  # 봇이 멈추면 버튼이 모두 묵살된다. 기록하고 다시 돈다
+                log(f'오류: {exc.__class__.__name__}: {exc}')
                 sleep(10)

@@ -220,9 +220,12 @@ def send_alerts(service, state, settings, *, sender=None):
     items, schedules, mark = alerts(state, after=after)
     if settings is not None:
         items = items if settings.urgent_alert else []
-        # 일정 버튼 봇이 있으면 일정 메일은 그 봇이 버튼으로 제안한다 (여기서 또 알리지 않는다)
-        schedules = schedules if settings.schedule_alert and not getattr(
-            settings, 'schedule_bot_token', '') else []
+        # 일정 버튼 봇이 제안을 만드는 설정이면 일정 메일은 그 봇이 버튼으로 제안한다 (또 알리지 않는다).
+        # 제안은 봇 토큰·대화방이 있고 분류기가 Jev일 때만 만든다 (cli._maybe_scan_schedules)
+        bot_proposes = bool(getattr(settings, 'schedule_bot_token', '')
+                            and getattr(settings, 'schedule_chat_id', '')
+                            and getattr(settings, 'classifier', '') == 'jev')
+        schedules = schedules if settings.schedule_alert and not bot_proposes else []
     if items or schedules:
         fill_items(service, items[:LIST_MAX] + schedules[:LIST_MAX])     # render_alert가 보이는 것
         sender(settings, render_alert(items, schedules))

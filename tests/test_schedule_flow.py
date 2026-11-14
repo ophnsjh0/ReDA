@@ -212,6 +212,60 @@ def test_schedule_bot_replaces_schedule_alert(state):
     state.set_sync(summary.ALERT_KEY, '2000-01-01T00:00:00+00:00')
     seed_mail(state)
     sent = []
-    with_bot = SimpleNamespace(urgent_alert=True, schedule_alert=True, schedule_bot_token='x')
+    with_bot = SimpleNamespace(urgent_alert=True, schedule_alert=True, schedule_bot_token='x',
+                               schedule_chat_id='1', classifier='jev')
     assert summary.send_alerts(None, state, with_bot, sender=lambda s, t: sent.append(t)) == 0
     assert sent == []
+
+
+def test_schedule_alert_stays_when_bot_cannot_propose(state, monkeypatch):
+    # 봇 토큰만 있고 대화방이 없거나 분류기가 Jev가 아니면 제안이 생기지 않으니 📅 알림을 그대로 보낸다
+    from reda import summary
+    monkeypatch.setattr(summary, 'fill_items', lambda service, items: None)
+    for half_set in (dict(schedule_chat_id='', classifier='jev'), dict(schedule_chat_id='1', classifier='anthropic')):
+        state.set_sync(summary.ALERT_KEY, '2000-01-01T00:00:00+00:00')
+        state.conn.execute('DELETE FROM messages')
+        seed_mail(state)
+        sent = []
+        settings = SimpleNamespace(urgent_alert=True, schedule_alert=True, schedule_bot_token='x', **half_set)
+        assert summary.send_alerts(None, state, settings, sender=lambda s, t: sent.append(t)) == 1
+        assert '📅' in sent[0]
+
+
+def test_stale_button_answer_failure_still_registers(state):
+    from reda.schedule_bot import TelegramError
+    pid = proposal(state)
+    bot, tg, created = make_bot(state)
+    bot.send_new()
+    real_call = tg.call
+
+    def call(method, **params):
+        if method == 'answerCallbackQuery':
+            raise TelegramError('query is too old')           # 봇 재시작 뒤 받은 오래된 버튼
+        return real_call(method, **params)
+    tg.call = call
+    assert bot.handle(press('add', pid)) == 'added' and created == [pid]
+
+
+def test_one_bad_update_does_not_stop_the_bot(state):
+    bot, tg, _ = make_bot(state)
+    tg.call = lambda method, **p: [{'update_id': 1, 'callback_query': {'data': 'add:1'}},   # id·chat 없음
+                                   {'update_id': 2, 'message': {'chat': {'id': int(CHAT)}, 'text': '목록'}}] \
+        if method == 'getUpdates' else {'message_id': 1}
+    bot.handle = lambda update: (_ for _ in ()).throw(ValueError('bad')) if update['update_id'] == 1 else 'ok'
+    assert bot.poll_once() == ['error: ValueError', 'ok']
+
+
+def test_scan_skips_a_mail_that_fails_and_continues(state):
+    good = seed_mail(state, 'm2')
+    seed_mail(state, 'm1')
+    state.conn.execute("UPDATE messages SET labeled_at = '2026-11-08T00:00:00+00:00' WHERE message_id = 'm1'")
+    state.conn.execute("UPDATE messages SET labeled_at = '2026-11-08T00:00:01+00:00' WHERE message_id = 'm2'")
+    state.set_sync(schedule.SCAN_KEY, '2000-01-01T00:00:00+00:00')
+
+    def get(mid):
+        if mid == 'm1':
+            raise LookupError('지워진 메일')
+        return good
+    created = schedule.scan(None, state, SETTINGS, always(0.9), get_message=get)
+    assert created and all(state.proposal(p)['message_id'] == 'm2' for p in created)
