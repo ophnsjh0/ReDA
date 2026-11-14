@@ -49,3 +49,21 @@ def test_same_changes_twice_are_recorded_once(state):
     record_changes(state, changes)
     again = record_changes(state, changes)
     assert (again.label_events, again.missed_replies) == (0, 0)
+
+
+def test_agent_label_changes_are_not_counted_as_user_corrections(state):
+    state.record_classification('m1', 't1', '답장필요')
+    state.record_feedback('draft_hold', message_id='m1', detail={'thread_id': 't1', 'reason': '동료가 답함'})
+    state.record_classification('m2', 't2', '답장필요')
+    state.record_feedback('agent_label', message_id='m2', detail={'label': '참고'})
+    changes = Changes(history_id='300', label_changes=[
+        LabelChange('m1', 't1', '답장필요', 'removed', '201'),   # 에이전트 보류
+        LabelChange('m1', 't1', '확인필요', 'added', '201'),
+        LabelChange('m2', 't2', '답장필요', 'removed', '202'),   # 에이전트 set_label
+        LabelChange('m2', 't2', '참고', 'added', '202'),
+        LabelChange('m1', 't1', '확인필요', 'removed', '210'),   # 그 뒤 사용자가 뗌
+    ])
+    result = record_changes(state, changes)
+    assert result.label_events == 1
+    assert [(e['message_id'], e['label'], e['action']) for e in state.label_events()] == [
+        ('m1', '확인필요', 'removed')]

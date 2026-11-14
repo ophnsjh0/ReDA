@@ -23,6 +23,7 @@ from googleapiclient.errors import HttpError
 
 from reda.gmail import client
 from reda.gmail.client import LABEL_REPLY
+from reda.mcp_server import PINNED_THREAD_KEY
 
 MAX_ATTEMPTS = 3
 LOOKBACK_DAYS = 3            # 이보다 오래전에 분류한 메일에는 초안을 쓰지 않는다
@@ -78,14 +79,30 @@ def _skip_reason(service, message_id, thread_id, reply_label_id):
     return ''
 
 
-def _held(state, thread_id):
-    for row in state.feedback('draft_hold'):
+def _marks(state):
+    """지금까지의 마지막 기록 번호 (피드백, 초안). 이번 실행에서 생긴 기록만 세려고 쓴다.
+    시각은 초 단위라 같은 초에 남은 예전 기록과 구분하지 못한다."""
+    feedback = state.conn.execute('SELECT COALESCE(MAX(id), 0) FROM feedback').fetchone()[0]
+    drafts = state.conn.execute('SELECT COALESCE(MAX(rowid), 0) FROM drafts').fetchone()[0]
+    return feedback, drafts
+
+
+def _held(state, thread_id, after_id):
+    """이번 실행에서 이 스레드를 보류했는가 (after_id 뒤의 피드백만 본다)."""
+    rows = state.conn.execute(
+        "SELECT detail FROM feedback WHERE kind = 'draft_hold' AND id > ?", (after_id,))
+    for row in rows:
         try:
             if json.loads(row['detail'] or '{}').get('thread_id') == thread_id:
                 return True
         except ValueError:
             continue
     return False
+
+
+def _drafted(state, thread_id, after_rowid):
+    return state.conn.execute('SELECT 1 FROM drafts WHERE thread_id = ? AND rowid > ?',
+                              (thread_id, after_rowid)).fetchone() is not None
 
 
 def draft_pending(service, state, settings, *, agent=run_agent, now=None, dry_run=False):
@@ -117,6 +134,8 @@ def draft_pending(service, state, settings, *, agent=run_agent, now=None, dry_ru
             result.details.append((message_id, 'skipped', reason))
             continue
         taken += 1
+        feedback_mark, draft_mark = _marks(state)
+        state.set_sync(PINNED_THREAD_KEY, thread_id)
         try:
             answer = agent(settings, thread_id)
         except Exception as exc:  # 에이전트 실패는 이 메일만의 실패로 남기고 다음으로
@@ -124,10 +143,12 @@ def draft_pending(service, state, settings, *, agent=run_agent, now=None, dry_ru
             result.failed += 1
             result.details.append((message_id, 'failed', str(exc)))
             continue
+        finally:
+            state.set_sync(PINNED_THREAD_KEY, '')
         # 결과는 에이전트의 말이 아니라 상태 DB로 판단한다 (reda-mcp가 저장·보류를 기록한다)
-        if state.drafts_for_thread(thread_id):
+        if _drafted(state, thread_id, draft_mark):
             status = 'drafted'
-        elif _held(state, thread_id):
+        elif _held(state, thread_id, feedback_mark):
             status = 'held'
         else:
             status = 'failed'

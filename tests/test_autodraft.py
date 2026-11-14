@@ -138,3 +138,24 @@ def test_dry_run_lists_without_recording(settings, state):
                                      agent=agent, now=NOW, dry_run=True)
     assert result.details == [('a', 'would_draft', ''), ('b', 'skip', '이미 답장함')]
     assert agent.calls == [] and state.draft_job('a') is None
+
+
+def test_old_hold_in_same_thread_does_not_count_as_this_runs_hold(settings, state):
+    classify(state, 'a')
+    state.record_feedback('draft_hold', message_id='old', detail={'thread_id': 't-a', 'reason': '예전'})
+    result = autodraft.draft_pending(mailbox('a'), state, settings,
+                                     agent=Agent(state, {'t-a': 'nothing'}), now=NOW)
+    assert (result.held, result.failed) == (0, 1)
+
+
+def test_agent_is_pinned_to_its_thread_while_running(settings, state):
+    from reda.mcp_server import PINNED_THREAD_KEY
+    classify(state, 'a')
+    seen = []
+
+    def agent(settings_, thread_id):
+        seen.append(state.get_sync(PINNED_THREAD_KEY))
+        return Agent(state, {})(settings_, thread_id)
+
+    autodraft.draft_pending(mailbox('a'), state, settings, agent=agent, now=NOW)
+    assert seen == ['t-a'] and not state.get_sync(PINNED_THREAD_KEY)

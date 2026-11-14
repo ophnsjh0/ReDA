@@ -28,7 +28,7 @@ from reda.classify.mailtext import customer_of
 from reda.priority import priority
 from reda.classify import Classification, ClassifierRequestRejected, ClassifierUnavailable
 from reda.gmail import client, history
-from reda.gmail.client import CLASSIFICATION_LABELS
+from reda.gmail.client import CLASSIFICATION_LABELS, LABEL_CHECK, LABEL_REPLY
 from reda.mail import Mail
 from reda.tracking import record_changes
 
@@ -150,7 +150,8 @@ def run(service, state, settings, classifier, *, resync_query='in:inbox newer_th
             outcome = classify(mail, settings, classifier, identity, replied_in_thread=replied)
             decision, source = outcome.classification, outcome.source
             label_ids = [labeler.id(decision.category)]
-            if decision.urgency == '높음':
+            if decision.urgency == '높음' and decision.category in (LABEL_REPLY, LABEL_CHECK):
+                # 담당자 판정으로 참고가 된 남의 메일에는 긴급 라벨을 붙이지 않는다
                 label_ids.append(labeler.id(LABEL_URGENT))
             client.add_labels(service, mail.id, label_ids)
             state.record_classification(mail.id, mail.thread_id, decision.category,

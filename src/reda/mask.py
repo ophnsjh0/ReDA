@@ -34,20 +34,21 @@ _RE_CFG_USER = re.compile(r'(?i)\busername\s+(\S+)\s+(?:privilege\s+\d+\s+)?'
 _RE_CFG_SECRET = re.compile(r'(?i)\b(?:password|secret|key)\s+\d\s+(\S+)')
 _RE_CFG_COMMUNITY = re.compile(r'(?i)\bsnmp-server\s+community\s+(\S+)')
 
-_RE_IPV4 = re.compile(r'(?<![\w.])(\d{1,3}(?:\.\d{1,3}){3})(?!\w|\.\d)')
-_RE_IPV6 = re.compile(r'(?<![\w:.])((?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4})(?![\w:])')
+# 경계는 ASCII 글자·숫자로만 본다. `\w`는 한글도 포함해서 '192.0.2.10에서'처럼 조사가 붙으면 놓친다
+_RE_IPV4 = re.compile(r'(?<![A-Za-z0-9.])(\d{1,3}(?:\.\d{1,3}){3})(?![A-Za-z0-9]|\.\d)')
+_RE_IPV6 = re.compile(r'(?<![A-Za-z0-9:.])((?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4})(?![A-Za-z0-9:])')
 # 개인정보
 _RE_EMAIL = re.compile(r'(?<![\w.%+-])([A-Za-z0-9][A-Za-z0-9._%+-]*)@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*'
-                       r'\.[A-Za-z]{2,})')
+                       r'\.[A-Za-z]{2,})', re.ASCII)
 _RE_PHONE = re.compile(
     r'(?<![\w.+-])('
     r'\+82[-. ]?\(?0?\d{1,2}\)?[-. ]?\d{3,4}[-. ]?\d{4}'        # +82 10-1234-5678
     r'|01[016789][-. ]?\d{3,4}[-. ]?\d{4}'                       # 010-1234-5678, 01012345678
     r'|\(?0\d{1,2}\)?[-. )]\s?\d{3,4}[-. ]\d{4}'                  # 02-123-4567, (031) 123-4567
     r'|1[5-9]\d{2}-\d{4}'                                         # 1588-1234
-    r')(?![\w-]|\.\d)')
-_RE_RRN = re.compile(r'(?<![\w-])(\d{6}-[1-8]\d{6})(?![\w-])')
-_RE_CARD = re.compile(r'(?<![\w-])(\d{4}[- ]\d{4}[- ]\d{4}[- ]\d{4}|\d{4}[- ]\d{6}[- ]\d{5})(?![\w-])')
+    r')(?![\w-]|\.\d)', re.ASCII)
+_RE_RRN = re.compile(r'(?<![\w-])(\d{6}-[1-8]\d{6})(?![\w-])', re.ASCII)
+_RE_CARD = re.compile(r'(?<![\w-])(\d{4}[- ]\d{4}[- ]\d{4}[- ]\d{4}|\d{4}[- ]\d{6}[- ]\d{5})(?![\w-])', re.ASCII)
 _RE_BANK = re.compile(r'(?:계좌(?:\s*번호)?|입금\s*계좌|account\s*(?:no\.?|number))\s*[:：]?\s*'
                       r'(?:[가-힣A-Za-z]+(?:은행)?\s*)?(\d[\d-]{8,18}\d)', re.IGNORECASE)
 

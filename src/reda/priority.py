@@ -19,6 +19,18 @@ def urgency_score(classification):
     return URGENCY_FALLBACK.get(classification.urgency, 1.5)
 
 
+def wait_bonus(category, waiting_hours):
+    bonus = min(WAIT_BONUS_MAX, WAIT_BONUS_PER_DAY * max(0.0, waiting_hours) / 24)
+    return bonus * CHECK_FACTOR if category == LABEL_CHECK else bonus
+
+
+def with_waiting(stored, category, waiting_hours):
+    """poll이 저장한 우선순위(기다린 시간 0)에 기다린 시간만 더한다. 고객사 가산점은 저장값에 들어 있다."""
+    if category not in (LABEL_REPLY, LABEL_CHECK):
+        return 0.0
+    return round(stored + wait_bonus(category, waiting_hours), 3)
+
+
 def priority(classification, *, customer=False, waiting_hours=0.0):
     """클수록 먼저 본다. 답장필요·확인필요가 아니면 0."""
     if classification.category not in (LABEL_REPLY, LABEL_CHECK):

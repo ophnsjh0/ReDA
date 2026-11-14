@@ -314,7 +314,7 @@ class StateDB:
             "SELECT m.message_id, m.thread_id FROM messages m "
             "LEFT JOIN draft_jobs j ON j.message_id = m.message_id "
             "WHERE m.category = '답장필요' AND m.labeled_at >= ? "
-            "AND NOT EXISTS (SELECT 1 FROM drafts d WHERE d.thread_id = m.thread_id) "
+            "AND NOT EXISTS (SELECT 1 FROM drafts d WHERE d.message_id = m.message_id) "
             "AND (j.message_id IS NULL OR (j.status = 'failed' AND j.attempts < ?)) "
             "ORDER BY m.labeled_at", (since, max_attempts)).fetchall()
 
@@ -346,6 +346,12 @@ class StateDB:
         return self.conn.execute('SELECT * FROM feedback WHERE kind = ? ORDER BY id',
                                  (kind,)).fetchall()
 
+    def feedback_for(self, message_id, kinds):
+        marks = ','.join('?' * len(kinds))
+        return self.conn.execute(
+            f'SELECT * FROM feedback WHERE message_id = ? AND kind IN ({marks}) ORDER BY id',
+            (message_id, *kinds)).fetchall()
+
     def upsert_alias(self, alias, kind, source, status='confirmed'):
         """없으면 더한다. 이미 있으면 상태를 바꾸지 않는다 (사용자가 거절한 별칭을 되살리지 않는다)."""
         if status not in ('candidate', 'confirmed', 'rejected'):
@@ -375,6 +381,11 @@ class StateDB:
                 ' created_at) VALUES (?, ?, ?, ?, ?)',
                 (draft_id, message_id, thread_id, json.dumps(list(evidence), ensure_ascii=False),
                  _now()))
+
+    def draft_for_message(self, message_id):
+        """이 메일에 답하는 ReDA 초안 (메일 단위로 하나). 같은 스레드에 새 고객 메일이 오면 새로 만든다."""
+        return self.conn.execute('SELECT * FROM drafts WHERE message_id = ? LIMIT 1',
+                                 (message_id,)).fetchone()
 
     def drafts_for_thread(self, thread_id):
         rows = self.conn.execute(

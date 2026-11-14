@@ -112,8 +112,8 @@ def reply_cc(message, identity):
 
 def save(service, state, ctx, body, evidence, identity):
     """초안을 원래 스레드에 저장한다. (draft_id, 저장한 본문)."""
-    if state.drafts_for_thread(ctx.thread_id):
-        raise DraftError('이 스레드에는 이미 ReDA가 만든 초안이 있음. 사용자가 확인하기 전에는 '
+    if state.draft_for_message(ctx.reply_to['id']):
+        raise DraftError('이 메일에는 이미 ReDA가 만든 초안이 있음. 사용자가 확인하기 전에는 '
                          '새로 만들지 않는다')
     text = compose(body, evidence, ctx)
     draft = client.create_reply_draft(service, ctx.reply_to, text,

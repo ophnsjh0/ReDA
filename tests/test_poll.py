@@ -333,3 +333,10 @@ def test_poll_works_without_user_info_in_env(monkeypatch, tmp_path, state):
     assert state.get_message('c1')['recipient_mode'] == 'personal_to'
     assert state.get_message('c2')['reason'] == '참조(Cc)로만 받음'
     assert classifier.seen == ['c1']
+
+
+def test_urgent_label_is_not_added_to_someone_elses_mail(team_settings, state):
+    classifier = CountingClassifier(Classification('답장필요', '높음', '장애', addressee='김철수 과장님'))
+    gmail = team_gmail(group_request('g1', '김철수 과장님, 장애입니다. 급합니다.'))
+    poll.run(gmail, state, team_settings, classifier)
+    assert gmail.modified == [('g1', ['참고'])]          # 참고가 된 남의 메일에 긴급 라벨 없음
