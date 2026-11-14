@@ -1,4 +1,6 @@
 """테스트용 가짜 Gmail 서비스. service.users().X().Y(**kw).execute() 호출 모양만 흉내 낸다."""
+import base64
+
 import httplib2
 from googleapiclient.errors import HttpError
 
@@ -30,23 +32,77 @@ class FakeGmail:
     labels: {'Label_1': '답장필요', ...}
     history_pages: history.list가 차례로 돌려줄 응답 목록. 'expired'면 404를 낸다.
     query_messages: messages.list가 돌려줄 메일 목록
+    messages: messages.get이 돌려줄 메일 {id: make_message(...)}
+    broken: messages.get이 500을 내는 메일 id
+    display_name: settings.sendAs.list가 돌려줄 기본 주소의 표시 이름
+    threads: threads.get이 돌려줄 스레드 {thread_id: [{'labelIds': [...], 'internalDate': '…'}]}
     """
 
     def __init__(self, *, labels=None, profile_history_id='1000', history_pages=None,
-                 query_messages=None):
-        self.labels = labels or {}
+                 query_messages=None, messages=None, broken=(), display_name='',
+                 threads=None):
+        self.labels = dict(labels or {})
         self.profile_history_id = profile_history_id
         self.history_pages = history_pages if history_pages is not None else []
         self.query_messages = query_messages or []
+        self.messages = dict(messages or {})
+        self.broken = set(broken)
+        self.display_name = display_name
+        self.threads = dict(threads or {})
+        self.drafts = []            # drafts.create로 만든 초안 (요청 본문)
+        self.modified = []          # (message_id, 붙인 라벨 이름 목록)
+        self.removed = []           # (message_id, 뗀 라벨 이름 목록)
         self.calls = []
 
     def users(self):
         return _Resource({
             'getProfile': self._get_profile,
-            'labels': _Resource({'list': self._labels_list}),
+            'labels': _Resource({'list': self._labels_list, 'create': self._labels_create}),
             'history': _Resource({'list': self._history_list}),
-            'messages': _Resource({'list': self._messages_list}),
+            'messages': _Resource({'list': self._messages_list, 'get': self._messages_get,
+                                   'modify': self._messages_modify}),
+            'threads': _Resource({'get': self._threads_get}),
+            'drafts': _Resource({'create': self._drafts_create}),
+            'settings': _Resource({'sendAs': _Resource({'list': self._send_as_list})}),
         })
+
+    def _send_as_list(self, userId):
+        self.calls.append(('sendAs.list',))
+        return {'sendAs': [{'sendAsEmail': 'me@corp.example.com', 'isPrimary': True,
+                            'displayName': self.display_name}]}
+
+    def _drafts_create(self, userId, body):
+        self.drafts.append(body)
+        return {'id': f'draft-{len(self.drafts)}', 'message': {'threadId': body['message']['threadId']}}
+
+    def _threads_get(self, userId, id, format='full'):
+        self.calls.append(('threads.get', id))
+        return {'id': id, 'messages': self.threads.get(id, [])}
+
+    def _labels_create(self, userId, body):
+        label_id = f'Label_{len(self.labels) + 1}'
+        self.labels[label_id] = body['name']
+        return {'id': label_id, 'name': body['name']}
+
+    def _messages_get(self, userId, id, format='full', metadataHeaders=None):
+        self.calls.append(('messages.get', id, format))
+        if id in self.broken:
+            raise HttpError(httplib2.Response({'status': 500}), b'{"error": "backend"}')
+        if id not in self.messages:
+            raise HttpError(httplib2.Response({'status': 404}), b'{"error": "notFound"}')
+        return self.messages[id]
+
+    def _messages_modify(self, userId, id, body):
+        names = [self.labels[i] for i in body.get('addLabelIds', [])]
+        self.modified.append((id, names))
+        removed = [self.labels[i] for i in body.get('removeLabelIds', [])]
+        if removed:
+            self.removed.append((id, removed))
+        msg = self.messages.get(id)
+        if msg is not None:
+            kept = [i for i in msg.get('labelIds', []) if i not in body.get('removeLabelIds', [])]
+            msg['labelIds'] = kept + list(body.get('addLabelIds', []))
+        return {'id': id}
 
     def _get_profile(self, userId):
         self.calls.append(('getProfile',))
@@ -62,7 +118,7 @@ class FakeGmail:
         index = int(pageToken) if pageToken else 0
         return self.history_pages[index]
 
-    def _messages_list(self, userId, q, maxResults):
+    def _messages_list(self, userId, q, maxResults, pageToken=None):
         self.calls.append(('messages.list', q))
         return {'messages': self.query_messages}
 
@@ -75,3 +131,17 @@ def added(history_id, message_id, thread_id, label_ids):
 def label_change(history_id, key, message_id, thread_id, label_ids):
     return {'id': history_id, key: [
         {'message': {'id': message_id, 'threadId': thread_id}, 'labelIds': label_ids}]}
+
+
+def make_message(message_id, *, thread_id=None, internal_date=0, labels=('INBOX',),
+                 body='', **headers):
+    """헤더는 키워드로 받는다. 밑줄은 하이픈으로 바꾼다 (reply_to → Reply-To)."""
+    names = {'x_original_sender': 'X-Original-Sender', 'auto_submitted': 'Auto-Submitted',
+             'list_id': 'List-Id', 'return_path': 'Return-Path'}
+    header_list = [{'name': names.get(k, k.replace('_', '-').title()), 'value': v}
+                   for k, v in headers.items()]
+    data = base64.urlsafe_b64encode(body.encode()).decode()
+    return {'id': message_id, 'threadId': thread_id or f't-{message_id}',
+            'internalDate': str(internal_date), 'labelIds': list(labels),
+            'payload': {'mimeType': 'text/plain', 'headers': header_list,
+                        'body': {'data': data}}}
