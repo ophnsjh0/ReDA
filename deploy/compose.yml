@@ -27,6 +27,8 @@ x-reda: &reda
     REDA_GMAIL_TOKEN_FILE: /opt/reda-data/token.json
     REDA_GMAIL_CREDENTIALS_FILE: /opt/reda-data/credentials.json
     REDA_CALENDAR_TOKEN_FILE: /opt/reda-data/calendar_token.json
+    REDA_REFERENCE_DOCS_DIR: /opt/reda-data/reference_docs
+    REDA_REFERENCE_DB: /opt/reda-data/references.db
     REDA_HERMES_BIN: ""
     REDA_DRAFT_PROFILE: reda
     REDA_SUMMARY_PROFILE: reda
