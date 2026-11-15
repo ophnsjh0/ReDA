@@ -50,7 +50,7 @@ status)
 uninstall)
     launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
     rm -f "$PLIST"
-    echo "껐음 (로그는 $LOG_DIR에 남아 있음)"
+    echo "껐음 (로그는 ${LOG_DIR}에 남아 있음)"
     ;;
 *)
     echo "사용법: sh $0 install | status | uninstall"; exit 2
