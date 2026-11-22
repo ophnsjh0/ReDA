@@ -130,4 +130,45 @@ sudo docker exec reda-poll hermes -p reda auth status openai-codex   # openai-co
 sudo docker restart reda-poll                     # 켜지자마자 한 번 돌기 (시험할 때)
 ```
 
+### 시연용 인스턴스 (운영과 따로)
+
+리뷰어가 직접 메일을 보내 보게 하려면, 실제 고객 메일이 없는 시연용 Gmail 계정으로 인스턴스를 하나 더 띄웁니다. 같은 서버에서 `reda-demo-poll`, `reda-demo-schedule-bot` 컨테이너로 돌고, 데이터 폴더·Gmail 토큰·텔레그램 봇이 모두 운영과 따로입니다. 운영 컨테이너는 멈추거나 바꾸지 않습니다.
+
+준비할 것:
+- 시연용 Gmail 계정
+- 새 Google Cloud 프로젝트의 OAuth 클라이언트 (외부·테스트, 시연 계정을 테스트 사용자로). 운영 프로젝트의 설정은 바꾸지 않습니다. 테스트 앱의 토큰은 7일마다 만료되니 시연 기간에만 씁니다.
+- 시연용 텔레그램 봇 (BotFather). 리뷰어가 먼저 봇에게 `/start`를 보냅니다.
+- 서비스 계정 하나 더 (권장): `sudo useradd --system --no-create-home --shell /usr/sbin/nologin reda-demo`
+
+**Mac:**
+
+```bash
+cp deploy/demo.env.example .env.demo              # 값 채우기
+mkdir -p ~/.reda-demo && cp <받은 OAuth 클라이언트 파일> ~/.reda-demo/credentials.json
+REDA_ENV_FILE=.env.demo uv run reda gmail auth    # 브라우저에서 시연 계정으로 "허용"
+REDA_ENV_FILE=.env.demo uv run reda calendar auth # 일정 등록을 보여 줄 때
+# 시연 봇의 Hermes .env (두 줄): TELEGRAM_BOT_TOKEN=<시연 봇 토큰>, TELEGRAM_HOME_CHANNEL=<리뷰어 텔레그램 숫자 ID>
+ssh <관리계정@서버> 'mkdir -p ~/reda-demo-staging/src'
+git archive HEAD | ssh <관리계정@서버> 'tar -x -C ~/reda-demo-staging/src'
+REDA_HANDOFF_ENV_FILE=.env.demo REDA_HANDOFF_STAGING=reda-demo-staging \
+REDA_HERMES_PROFILE_ENV=<시연 봇 Hermes .env> sh deploy/mac-handoff.sh <관리계정@서버>
+```
+
+시연 모드의 `mac-handoff.sh`는 Mac 자동 실행을 끄지 않고, 시연 설정이 운영 데이터 폴더·Gmail 토큰·운영 봇 설정을 가리키면 멈춥니다.
+
+**서버:** `~/reda-demo-staging/compose.env`는 운영 것을 복사해 세 줄을 바꿉니다.
+
+```bash
+REDA_NAME=reda-demo
+REDA_ROOT=/srv/reda-demo
+REDA_UID=<reda-demo uid>                          # REDA_GID도
+```
+
+```bash
+sudo sh ~/reda-demo-staging/src/deploy/server-setup.sh ~/reda-demo-staging
+sudo docker logs --tail 20 reda-demo-poll
+```
+
+데이터 폴더마다 주인 이름표(`.reda-name`)를 두어, 시연 설정이 운영 폴더를 가리키면 설치가 멈춥니다. 시연 주소로는 누구나 메일을 보낼 수 있고 보낼 때마다 분류·초안 사용량이 나가므로, 시연이 끝나면 내립니다: `sudo docker stop reda-demo-poll reda-demo-schedule-bot`.
+
 자세한 계획과 결정 사항은 `기획안/`에 있습니다.

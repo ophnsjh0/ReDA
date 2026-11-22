@@ -3,6 +3,7 @@
 #   sudo sh ~/reda-staging/src/deploy/server-setup.sh ~/reda-staging
 # 준비 폴더(<staging>)에 있어야 하는 것:
 #   compose.env            REDA_ROOT, REDA_UID, REDA_GID, HERMES_IMAGE(이미지 ID), REDA_AGENT_PROVIDER, REDA_AGENT_MODEL
+#                          (선택) REDA_NAME: 인스턴스 이름, 기본 reda(운영). 시연용은 reda-demo와 다른 REDA_ROOT
 #   src/                   ReDA 소스 (git archive)
 #   secrets/               mac-handoff.sh가 보낸 token.json, calendar_token.json, credentials.json, state.db, reda.env, hermes.env
 #   secrets/agent.env      (선택) 초안 모델 API 키 한 줄 (예: ANTHROPIC_API_KEY=...). hermes.env 뒤에 붙인다
@@ -12,15 +13,31 @@ set -eu
 STAGING=$(cd "${1:?준비 폴더 경로}" && pwd)
 . "$STAGING/compose.env"
 : "${REDA_ROOT:?}" "${REDA_UID:?}" "${REDA_GID:?}" "${HERMES_IMAGE:?}" "${REDA_AGENT_PROVIDER:?}" "${REDA_AGENT_MODEL:?}"
+NAME="${REDA_NAME:-reda}"
+# 이름은 컨테이너·compose 프로젝트·파일 경로에 그대로 들어간다
+echo "$NAME" | grep -Eq '^reda(-[a-z0-9]+)*$' || { echo "REDA_NAME은 reda 또는 reda-<영소문자·숫자>: $NAME" >&2; exit 1; }
 SRC="$STAGING/src"
 SECRETS="$STAGING/secrets"
 VERSION=$(cat "$SRC/deploy/VERSION" 2>/dev/null || date +%Y%m%d%H%M)
 IMAGE="reda:$VERSION"
-PROFILE="$REDA_ROOT/hermes/profiles/reda"
+PROFILE="$REDA_ROOT/hermes/profiles/reda"   # Hermes 홈이 인스턴스마다 따로라 프로필 이름은 같아도 된다
+# 운영(reda)은 예전 경로를 그대로 쓴다. 다른 인스턴스가 운영 compose 파일을 덮어쓰지 않게 파일을 나눈다
+if [ "$NAME" = reda ]; then COMPOSE_FILE=/opt/reda-deploy/compose.yml; else COMPOSE_FILE="/opt/reda-deploy/$NAME.compose.yml"; fi
 
 compose() {
-    docker compose -p reda --env-file "$REDA_ROOT.compose.env" -f /opt/reda-deploy/compose.yml "$@"
+    docker compose -p "$NAME" --env-file "$REDA_ROOT.compose.env" -f "$COMPOSE_FILE" "$@"
 }
+
+# 데이터 폴더마다 주인 인스턴스 이름을 적어 둔다. 시연용 설치가 compose.env를 잘못 써서
+# 운영 데이터 폴더를 가리키면, 운영 컨테이너를 멈추거나 운영 토큰·DB를 덮어쓰기 전에 멈춘다
+OWNER_FILE="$REDA_ROOT/.reda-name"
+if [ -f "$OWNER_FILE" ]; then
+    OWNER=$(cat "$OWNER_FILE")
+    [ "$OWNER" = "$NAME" ] || { echo "$REDA_ROOT 는 $OWNER 인스턴스의 데이터 폴더다 (지금 이름: $NAME)" >&2; exit 1; }
+elif [ "$NAME" != reda ] && [ -e "$REDA_ROOT/data/state.db" ]; then
+    # 이름표가 생기기 전에 설치한 운영 폴더일 수 있다
+    echo "$REDA_ROOT 에 이름표 없이 상태 DB가 있다: 다른 인스턴스(운영)의 폴더인지 확인한다" >&2; exit 1
+fi
 
 # PROFILE은 서비스 계정 소유이고 컨테이너가 쓸 수 있는 폴더다. root가 쓰기 전에 대상을 지워서
 # 그 자리에 놓인 심볼릭 링크를 따라 서버의 다른 파일을 덮어쓰지 않게 한다.
@@ -49,6 +66,8 @@ docker build --progress=plain -f "$SRC/deploy/Dockerfile" --build-arg "HERMES_IM
 echo '2) 데이터 폴더'
 install -d -m 700 -o "$REDA_UID" -g "$REDA_GID" "$REDA_ROOT" "$REDA_ROOT/hermes" "$REDA_ROOT/data" \
     "$REDA_ROOT/hermes/profiles" "$PROFILE"
+# 그 자리의 깨진 심볼릭 링크를 따라 다른 파일에 쓰지 않게 지우고 쓴다
+[ -f "$OWNER_FILE" ] || { rm -f "$OWNER_FILE"; echo "$NAME" > "$OWNER_FILE"; chmod 644 "$OWNER_FILE"; }
 write_config
 fresh "$PROFILE/SOUL.md"
 cat "$SRC/distribution/SOUL.md" > "$PROFILE/SOUL.md"
@@ -59,7 +78,7 @@ printf "description: 'ReDA 운영: 답장필요 메일의 초안을 reda-mcp 도
 if [ -d "$SECRETS" ] && [ -n "$(ls -A "$SECRETS" 2>/dev/null)" ]; then
     echo '3) 비밀 파일 옮기기 (서비스 계정 소유, 600)'
     # 다시 실행할 때 돌고 있는 컨테이너가 쓰는 상태 DB를 바꾸면 DB가 깨질 수 있어 먼저 멈춘다
-    docker stop reda-poll reda-schedule-bot >/dev/null 2>&1 || true
+    docker stop "$NAME-poll" "$NAME-schedule-bot" >/dev/null 2>&1 || true
     if [ -f "$SECRETS/state.db" ]; then
         # 이전 DB의 WAL이 새 DB에 다시 적용되지 않게 지운다
         rm -f "$REDA_ROOT/data/state.db-wal" "$REDA_ROOT/data/state.db-shm"
@@ -94,8 +113,9 @@ chown -R "$REDA_UID:$REDA_GID" "$PROFILE"
 
 echo '4) compose 설정'
 install -m 600 -o root -g root /dev/null "$REDA_ROOT.compose.env"
-{ grep -v '^REDA_IMAGE=' "$STAGING/compose.env"; echo "REDA_IMAGE=$IMAGE"; } > "$REDA_ROOT.compose.env"
-mkdir -p /opt/reda-deploy && cp "$SRC/deploy/compose.yml" /opt/reda-deploy/compose.yml
+{ grep -Ev '^(REDA_IMAGE|REDA_NAME)=' "$STAGING/compose.env"; echo "REDA_NAME=$NAME"; echo "REDA_IMAGE=$IMAGE"; } \
+    > "$REDA_ROOT.compose.env"
+mkdir -p /opt/reda-deploy && cp "$SRC/deploy/compose.yml" "$COMPOSE_FILE"
 
 # 파일이 아니라 로그인 상태를 본다: auth.json에 API 키만 있어도 파일은 비어 있지 않다.
 # Hermes v0.21.5의 `auth add openai-codex`는 예비 목록(credential pool)에만 저장하고 `hermes -z`와
@@ -115,4 +135,4 @@ fi
 echo '6) 시작'
 compose up -d
 compose ps
-echo "로그: sudo docker logs -f reda-poll   /   sudo docker logs -f reda-schedule-bot"
+echo "로그: sudo docker logs -f $NAME-poll   /   sudo docker logs -f $NAME-schedule-bot"

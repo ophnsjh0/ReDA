@@ -4,6 +4,8 @@
 #   REDA_IMAGE  빌드한 이미지 (reda:<git sha>)
 #   REDA_ROOT   데이터 폴더 (그 아래 hermes/ = Hermes 홈, data/ = ReDA 상태 DB·토큰·설정)
 #   REDA_UID / REDA_GID  서비스 계정 uid·gid
+#   REDA_NAME   인스턴스 이름 (기본 reda = 운영). 시연용은 reda-demo처럼 다른 이름과 다른 REDA_ROOT를 쓴다.
+#               컨테이너 이름이 <REDA_NAME>-poll, <REDA_NAME>-schedule-bot이 되고 compose 프로젝트도 따로다
 #
 # gateway·대시보드는 띄우지 않는다. 메신저로 보내기(hermes send)는 봇 토큰만으로 되고, 초안은 reda poll이
 # `hermes -z`로 그때그때 에이전트를 부른다. 텔레그램에서 에이전트로 들어오는 대화 경로가 없다.
@@ -42,10 +44,10 @@ x-reda: &reda
 services:
   poll:
     <<: *reda
-    container_name: reda-poll
+    container_name: ${REDA_NAME:-reda}-poll
     entrypoint: ["/bin/sh", "/opt/reda/deploy/run-poll.sh"]
 
   schedule-bot:
     <<: *reda
-    container_name: reda-schedule-bot
+    container_name: ${REDA_NAME:-reda}-schedule-bot
     entrypoint: ["/bin/sh", "/opt/reda/deploy/run-schedule-bot.sh"]
