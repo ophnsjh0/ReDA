@@ -12,9 +12,11 @@
 # 시연용 인스턴스(운영과 다른 메일함)는 환경 변수로 다른 설정을 보낸다:
 #   REDA_HANDOFF_ENV_FILE=.env.demo REDA_HANDOFF_STAGING=reda-demo-staging \
 #   REDA_HERMES_PROFILE_ENV=<시연 봇 토큰이 든 Hermes .env> sh deploy/mac-handoff.sh <관리계정@서버>
-# 이때는 Mac 자동 실행(운영 메일함)을 끄지 않고, 상태 DB가 없으면 서버에서 새 DB로 시작한다.
-# 시연용 설정이 운영 데이터 폴더·Gmail 토큰·Hermes .env(텔레그램 봇)를 가리키면 멈춘다.
+# 이때는 Mac 자동 실행(운영 메일함)을 끄지 않고, 상태 DB는 보내지 않는다 (서버의 시연 DB를 그대로 두고,
+# 처음이면 서버에서 새로 만든다). 시연 설정이 운영 데이터 폴더·Gmail 토큰·봇을 가리키거나
+# 운영 파일을 복사한 것이면 멈춘다.
 set -eu
+CALLER_DIR=$(pwd)
 TARGET="${1:?사용법: sh deploy/mac-handoff.sh <관리계정@서버> [SSH 키]}"
 KEY="${2:-$HOME/.ssh/id_ed25519}"
 REPO=$(cd "$(dirname "$0")/.." && pwd)
@@ -24,14 +26,33 @@ REPO="${MAIN:-$REPO}"
 MAIN_ENV="$REPO/.env"
 MAIN_HERMES_ENV="$HOME/.hermes/profiles/reda-dev/.env"
 ENV_FILE="${REDA_HANDOFF_ENV_FILE:-$MAIN_ENV}"
-case "$ENV_FILE" in /*) ;; *) ENV_FILE="$REPO/$ENV_FILE" ;; esac
+# 상대 경로는 명령을 실행한 폴더 기준 (문서가 그 폴더에서 cp로 만든다)
+case "$ENV_FILE" in /*) ;; *) ENV_FILE="$CALLER_DIR/$ENV_FILE" ;; esac
 [ -f "$ENV_FILE" ] || { echo "없음: $ENV_FILE" >&2; exit 1; }
 STAGING="${REDA_HANDOFF_STAGING:-reda-staging}"
-echo "$STAGING" | grep -Eq '^[A-Za-z0-9._-]+$' || { echo "REDA_HANDOFF_STAGING은 서버 홈 아래 폴더 이름 하나: $STAGING" >&2; exit 1; }
+# 점으로 시작하는 이름(., .. 포함)은 받지 않는다: 홈 밖이나 홈 바로 아래에 비밀 파일이 놓인다
+echo "$STAGING" | grep -Eq '^[A-Za-z0-9_][A-Za-z0-9._-]*$' || { echo "REDA_HANDOFF_STAGING은 서버 홈 아래 폴더 이름 하나: $STAGING" >&2; exit 1; }
 
-# 심볼릭 링크를 풀어 같은 파일인지 비교한다 (없는 파일은 경로 그대로)
+# 경로의 모든 부분(마지막 파일·폴더 포함)의 심볼릭 링크를 풀어 비교한다
 real() {
-    if [ -e "$1" ]; then (cd "$(dirname "$1")" && echo "$(pwd -P)/$(basename "$1")"); else echo "$1"; fi
+    python3 -I -c 'import os, sys; print(os.path.realpath(os.path.expanduser(sys.argv[1])))' "$1"
+}
+# env 파일 두 개의 값이 같은지 본다 (값은 출력하지 않는다). 둘 다 비어 있으면 다르다고 본다
+same_value() {
+    python3 -I - "$@" <<'EOF'
+import sys
+def get(path, key):
+    try:
+        for line in open(path, encoding='utf-8'):
+            k, sep, v = line.strip().partition('=')
+            if sep and k.strip() == key:
+                return v.strip().strip('"').strip("'")
+    except FileNotFoundError:
+        pass
+    return ''
+a, b = get(sys.argv[1], sys.argv[2]), get(sys.argv[3], sys.argv[4])
+sys.exit(0 if a and a == b else 1)
+EOF
 }
 if [ "$(real "$ENV_FILE")" = "$(real "$MAIN_ENV")" ]; then MAIN_MODE=1; else MAIN_MODE=0; fi
 if [ "$MAIN_MODE" = 1 ]; then
@@ -74,6 +95,18 @@ if [ "$MAIN_MODE" = 0 ]; then
     [ "$(real "$TOKEN")" != "$(real "$MAIN_TOKEN")" ] || { echo "시연용 Gmail 토큰이 운영 토큰이다: $TOKEN" >&2; exit 1; }
     [ "$(real "$HERMES_PROFILE_ENV")" != "$(real "$MAIN_HERMES_ENV")" ] \
         || { echo "시연용 Hermes .env가 운영 봇 설정이다: $HERMES_PROFILE_ENV" >&2; exit 1; }
+    # 경로가 달라도 운영 파일을 복사한 것이면 멈춘다
+    MAIN_TOKEN_REAL=$(real "$MAIN_TOKEN")
+    if [ -f "$MAIN_TOKEN_REAL" ] && cmp -s "$TOKEN" "$MAIN_TOKEN_REAL"; then
+        echo "시연용 Gmail 토큰이 운영 토큰을 복사한 것이다: $TOKEN" >&2; exit 1
+    fi
+    # 같은 봇 토큰으로 일정 봇이 두 곳에서 돌면 버튼 응답을 나눠 받고, 알림이 운영 대화방으로 간다
+    if same_value "$ENV_FILE" REDA_SCHEDULE_BOT_TOKEN "$MAIN_ENV" REDA_SCHEDULE_BOT_TOKEN \
+        || same_value "$ENV_FILE" REDA_SCHEDULE_BOT_TOKEN "$MAIN_HERMES_ENV" TELEGRAM_BOT_TOKEN \
+        || same_value "$HERMES_PROFILE_ENV" TELEGRAM_BOT_TOKEN "$MAIN_ENV" REDA_SCHEDULE_BOT_TOKEN \
+        || same_value "$HERMES_PROFILE_ENV" TELEGRAM_BOT_TOKEN "$MAIN_HERMES_ENV" TELEGRAM_BOT_TOKEN; then
+        echo "시연 봇 토큰이 운영 봇 토큰과 같다: 시연용 봇을 새로 만든다" >&2; exit 1
+    fi
     echo '1) 시연용: Mac 자동 실행(운영 메일함)은 그대로 둔다'
 else
     echo '1) Mac 자동 실행 끄기'
@@ -88,7 +121,10 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 chmod 700 "$TMP"
 
-if [ -f "$DATA/state.db" ]; then
+if [ "$MAIN_MODE" = 0 ]; then
+    # Mac의 시연 DB는 미리 보기로 생긴 오래된 것일 수 있다. 보내면 서버가 처리한 메일을 다시 처리해 초안이 두 번 생긴다
+    echo '2) 시연용: 상태 DB는 보내지 않는다 (서버의 시연 DB를 그대로 쓴다)'
+elif [ -f "$DATA/state.db" ]; then
     echo '2) 상태 DB 복사본'
     python3 -I - "$DATA/state.db" "$TMP/state.db" <<'EOF'
 import sqlite3, sys
@@ -97,8 +133,6 @@ src = sqlite3.connect(f'file:{sys.argv[1]}?mode=ro', uri=True); dst = sqlite3.co
 src.backup(dst); dst.close()
 print('   스키마', src.execute('PRAGMA user_version').fetchone()[0])
 EOF
-else
-    echo '2) 상태 DB 없음: 서버에서 새 DB로 시작한다'
 fi
 
 cp "$TOKEN" "$TMP/token.json"

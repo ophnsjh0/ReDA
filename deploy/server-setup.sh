@@ -3,7 +3,8 @@
 #   sudo sh ~/reda-staging/src/deploy/server-setup.sh ~/reda-staging
 # 준비 폴더(<staging>)에 있어야 하는 것:
 #   compose.env            REDA_ROOT, REDA_UID, REDA_GID, HERMES_IMAGE(이미지 ID), REDA_AGENT_PROVIDER, REDA_AGENT_MODEL
-#                          (선택) REDA_NAME: 인스턴스 이름, 기본 reda(운영). 시연용은 reda-demo와 다른 REDA_ROOT
+#                          REDA_NAME: 인스턴스 이름 (운영 reda, 시연 reda-demo 등). 새 데이터 폴더에는 꼭 적는다.
+#                          이름표가 생기기 전에 설치한 운영 폴더(상태 DB가 있음)만 빠져도 reda로 본다
 #   src/                   ReDA 소스 (git archive)
 #   secrets/               mac-handoff.sh가 보낸 token.json, calendar_token.json, credentials.json, state.db, reda.env, hermes.env
 #   secrets/agent.env      (선택) 초안 모델 API 키 한 줄 (예: ANTHROPIC_API_KEY=...). hermes.env 뒤에 붙인다
@@ -31,6 +32,10 @@ compose() {
 # 데이터 폴더마다 주인 인스턴스 이름을 적어 둔다. 시연용 설치가 compose.env를 잘못 써서
 # 운영 데이터 폴더를 가리키면, 운영 컨테이너를 멈추거나 운영 토큰·DB를 덮어쓰기 전에 멈춘다
 OWNER_FILE="$REDA_ROOT/.reda-name"
+# REDA_NAME을 빠뜨린 새 설치는 기본값 reda가 되어 운영 컨테이너를 멈추고 그 이름으로 다시 띄운다
+if [ -z "${REDA_NAME:-}" ] && [ ! -f "$OWNER_FILE" ] && [ ! -e "$REDA_ROOT/data/state.db" ]; then
+    echo "새 데이터 폴더($REDA_ROOT)다: compose.env에 REDA_NAME을 적는다" >&2; exit 1
+fi
 if [ -f "$OWNER_FILE" ]; then
     OWNER=$(cat "$OWNER_FILE")
     [ "$OWNER" = "$NAME" ] || { echo "$REDA_ROOT 는 $OWNER 인스턴스의 데이터 폴더다 (지금 이름: $NAME)" >&2; exit 1; }
@@ -38,6 +43,13 @@ elif [ "$NAME" != reda ] && [ -e "$REDA_ROOT/data/state.db" ]; then
     # 이름표가 생기기 전에 설치한 운영 폴더일 수 있다
     echo "$REDA_ROOT 에 이름표 없이 상태 DB가 있다: 다른 인스턴스(운영)의 폴더인지 확인한다" >&2; exit 1
 fi
+# 같은 이름의 컨테이너가 이미 다른 데이터 폴더로 돌고 있으면 멈춘다 (멈추고 덮어쓰기 전에)
+for c in "$NAME-poll" "$NAME-schedule-bot"; do
+    mounted=$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/opt/reda-data"}}{{.Source}}{{end}}{{end}}' "$c" 2>/dev/null || true)
+    if [ -n "$mounted" ] && [ "$mounted" != "$REDA_ROOT/data" ]; then
+        echo "컨테이너 $c 가 다른 데이터 폴더($mounted)를 쓰고 있다: REDA_NAME·REDA_ROOT를 확인한다" >&2; exit 1
+    fi
+done
 
 # PROFILE은 서비스 계정 소유이고 컨테이너가 쓸 수 있는 폴더다. root가 쓰기 전에 대상을 지워서
 # 그 자리에 놓인 심볼릭 링크를 따라 서버의 다른 파일을 덮어쓰지 않게 한다.
@@ -113,7 +125,9 @@ chown -R "$REDA_UID:$REDA_GID" "$PROFILE"
 
 echo '4) compose 설정'
 install -m 600 -o root -g root /dev/null "$REDA_ROOT.compose.env"
-{ grep -Ev '^(REDA_IMAGE|REDA_NAME)=' "$STAGING/compose.env"; echo "REDA_NAME=$NAME"; echo "REDA_IMAGE=$IMAGE"; } \
+# COMPOSE_PROJECT_NAME: 이 파일로 compose를 손으로 돌려도 인스턴스마다 다른 프로젝트가 된다
+{ grep -Ev '^(REDA_IMAGE|REDA_NAME|COMPOSE_PROJECT_NAME)=' "$STAGING/compose.env"
+  echo "REDA_NAME=$NAME"; echo "COMPOSE_PROJECT_NAME=$NAME"; echo "REDA_IMAGE=$IMAGE"; } \
     > "$REDA_ROOT.compose.env"
 mkdir -p /opt/reda-deploy && cp "$SRC/deploy/compose.yml" "$COMPOSE_FILE"
 

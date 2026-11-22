@@ -1,5 +1,6 @@
 # ReDA 운영 (4단계, 결정 4-3): 서비스 계정 uid로 도는 컨테이너 2개, 공개 포트 없음.
-#   docker compose --env-file <서버의 compose.env> -f deploy/compose.yml up -d
+#   docker compose -p <REDA_NAME> --env-file <REDA_ROOT>.compose.env -f <설치된 compose 파일> up -d
+#   (server-setup.sh가 만드는 compose.env에는 COMPOSE_PROJECT_NAME도 있다. 인스턴스마다 프로젝트가 달라야 서로 건드리지 않는다)
 # compose.env(서버에만 둔다, git 제외)에 적는 값:
 #   REDA_IMAGE  빌드한 이미지 (reda:<git sha>)
 #   REDA_ROOT   데이터 폴더 (그 아래 hermes/ = Hermes 홈, data/ = ReDA 상태 DB·토큰·설정)
